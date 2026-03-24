@@ -1,0 +1,23 @@
+{
+  "title": "Documentation",
+  "root": true,
+  "pages": [
+    "index",
+    "---Getting Started---",
+    "...getting-started",
+    "---Authentication---",
+    "...authentication",
+    "---Widget Integration---",
+    "...widget-integration",
+    "---Wallet Callbacks---",
+    "...wallet-callbacks",
+    "---Webhooks---",
+    "...webhooks",
+    "---Realtime---",
+    "...realtime",
+    "---API Reference---",
+    "...api-reference",
+    "---Guides---",
+    "...guides"
+  ]
+}

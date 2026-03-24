@@ -1,0 +1,35 @@
+---
+title: Sportuno API Documentation
+description: Everything you need to integrate the Sportuno tournament platform
+---
+
+Welcome to the Sportuno operator documentation. This guide covers everything you need to embed the Sportuno tournament widget into your platform.
+
+## Quick Links
+
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+<Cards>
+  <Card title="Quickstart" href="/docs/getting-started/quickstart">
+    Get up and running in 5 minutes
+  </Card>
+  <Card title="Authentication" href="/docs/authentication/overview">
+    API key model and security
+  </Card>
+  <Card title="Widget Integration" href="/docs/widget-integration/overview">
+    Embed the tournament widget
+  </Card>
+  <Card title="API Reference" href="/docs/api-reference">
+    Full endpoint documentation
+  </Card>
+</Cards>
+
+## How It Works
+
+Integrating Sportuno into your platform takes three steps:
+
+1. **Create a widget session** — Your backend calls our API with your secret key to get a session token
+2. **Embed the widget** — Load our JavaScript SDK and pass the session token to render the tournament UI
+3. **Handle wallet callbacks** — Implement endpoints for us to debit/credit your players' wallets
+
+The widget handles everything else: tournament browsing, enrollment, betting, rebuy/add-on, and leaderboards.
