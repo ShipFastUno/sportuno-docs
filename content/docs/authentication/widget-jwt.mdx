@@ -1,0 +1,194 @@
+---
+title: Widget JWT
+description: How the Widget JWT is structured, issued, refreshed, and revoked.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Overview
+
+The Widget JWT is a short-lived RS256 JSON Web Token that represents an authenticated player session. It is issued by your backend (using your secret key), passed to the browser widget, and presented by the widget on every Tier 2 request.
+
+The JWT encodes the player's identity, currency, permissions, and the operator context — all the information needed to authorise a bet, rebuy, or add-on without a round-trip to the database on each request.
+
+## Obtaining a JWT
+
+Your backend calls the session creation endpoint with your secret key:
+
+```http
+POST /v1/widget/sessions
+Authorization: Bearer sk_live_…
+X-Operator-ID: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: application/json
+
+{
+  "operator_player_id": "player-123",
+  "player_currency": "USD",
+  "permissions": ["enroll", "rebuy", "addon", "place_bet"],
+  "allowed_origins": ["https://app.example.com"]
+}
+```
+
+Response:
+
+```json
+{
+  "jwt": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9…",
+  "refresh_token": "rt_…",
+  "expires_at": "2026-03-24T10:15:00Z",
+  "refresh_expires_at": "2026-03-31T10:00:00Z"
+}
+```
+
+Pass `jwt` to the widget. Store `refresh_token` on the server side for later refresh calls.
+
+## JWT Claims
+
+The Widget JWT payload contains the following claims:
+
+| Claim | Type | Description |
+|-------|------|-------------|
+| `sub` | string (UUID) | Sportuno's internal player ID |
+| `operator_id` | string (UUID) | Your operator UUID |
+| `operator_player_id` | string | The player ID from your system |
+| `player_currency` | string | ISO 4217 currency code (e.g. `USD`, `EUR`) |
+| `permissions` | string[] | Allowed player actions |
+| `allowed_origins` | string[] | Origins from which this JWT may be used |
+| `session_id` | string (UUID) | Unique session identifier for audit |
+| `iat` | number | Issued-at timestamp (Unix seconds) |
+| `exp` | number | Expiry timestamp (Unix seconds) |
+
+### Permissions
+
+The `permissions` claim is an array of action strings. The widget will only present UI for actions included in this list.
+
+| Value | Allows |
+|-------|--------|
+| `enroll` | Tournament enrollment |
+| `rebuy` | Rebuy in an ongoing tournament |
+| `addon` | Add-on in an ongoing tournament |
+| `place_bet` | Bet placement |
+
+Pass only the permissions relevant to the player's entitlements in your platform. A player who has not purchased a rebuy pack, for example, should not receive the `rebuy` permission.
+
+### Example Decoded Payload
+
+```json
+{
+  "sub": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "operator_id": "550e8400-e29b-41d4-a716-446655440000",
+  "operator_player_id": "player-123",
+  "player_currency": "USD",
+  "permissions": ["enroll", "place_bet"],
+  "allowed_origins": ["https://app.example.com"],
+  "session_id": "9e8d7c6b-5a4f-3210-fedc-ba9876543210",
+  "iat": 1742810400,
+  "exp": 1742811300
+}
+```
+
+## JWT Lifecycle
+
+```
+T+0       T+15min     T+24h       T+7d
+  │           │           │           │
+  ├───────────┤           │           │
+  │  JWT TTL  │           │           │
+  │  (valid)  │           │           │
+  │           │           │           │
+  ├───────────────────────┤           │
+  │  Grace period (refresh token      │
+  │  remains valid for refresh)       │
+  │                                   │
+  ├───────────────────────────────────┤
+  │  Refresh token TTL (7 days)       │
+```
+
+- **JWT TTL**: 15 minutes. After expiry, the widget cannot make Tier 2 requests.
+- **Refresh grace period**: 24 hours. A refresh token can renew an expired JWT for up to 24 hours after the JWT's `exp`.
+- **Refresh token TTL**: 7 days. After this, the session is fully expired and a new session must be created.
+
+<Callout type="info" title="Refresh before expiry">
+Refresh the JWT before it expires to avoid interrupting the player experience. The widget SDK handles this automatically if you configure the refresh endpoint in your integration. If you are calling the API directly, refresh at `exp - 60s` (one minute before expiry).
+</Callout>
+
+## Refreshing a JWT
+
+To exchange a refresh token for a new JWT:
+
+```http
+POST /v1/widget/sessions/refresh
+Authorization: Bearer sk_live_…
+X-Operator-ID: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: application/json
+
+{
+  "refresh_token": "rt_…"
+}
+```
+
+Response:
+
+```json
+{
+  "jwt": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9…",
+  "expires_at": "2026-03-24T11:00:00Z"
+}
+```
+
+The refresh endpoint validates:
+
+1. The refresh token is valid and has not been revoked.
+2. The operator is still active (defence-in-depth check).
+3. The refresh token has not exceeded its 7-day TTL.
+
+A new JWT is returned. The refresh token itself is not rotated on each refresh.
+
+## Verification
+
+The Widget JWT is signed with RS256. The public key is available via the standard JWKS endpoint:
+
+```
+GET https://api.sportuno.win/.well-known/jwks.json
+```
+
+The edge-API verifies the JWT signature on every Tier 2 request without contacting the auth service. This means JWT verification adds no additional latency beyond local crypto.
+
+## Revocation
+
+The JWT model does not support per-token revocation (this is by design — it enables stateless verification). Revocation is handled at two levels:
+
+### Operator-Level Revocation
+
+Disabling an operator in the backoffice prevents the edge-API from accepting new session refreshes. After the operator is disabled:
+
+1. Existing JWTs remain valid until their `exp` (up to 15 minutes).
+2. Refresh attempts fail with `403 OPERATOR_DISABLED`.
+3. No new sessions can be created.
+
+**Worst-case revocation latency:**
+
+| Layer | Default TTL | Max delay |
+|-------|-------------|-----------|
+| Edge operator config cache | 5 minutes | 5 min |
+| Existing JWT validity | 15 minutes | 15 min |
+| **Total worst case** | | **20 min** |
+
+To reduce this window, lower `widget_config_cache_ttl_secs` in the edge-API configuration or use the cache invalidation API for immediate effect.
+
+### Refresh Token Revocation
+
+Individual refresh tokens can be revoked via the backoffice API. This prevents further JWT renewals for that specific session while existing JWTs continue until natural expiry.
+
+<Callout type="warn" title="Plan for the 20-minute window">
+If you need immediate session termination — for example, after detecting fraud — combine operator disabling with lowering the cache TTL. For user-level logout, simply stop refreshing the JWT; it will expire within 15 minutes.
+</Callout>
+
+## Error Reference
+
+| Error code | HTTP status | Cause |
+|-----------|-------------|-------|
+| `WIDGET_AUTH_REQUIRED` | 401 | Tier 2 endpoint called without a Widget JWT |
+| `PERMISSION_DENIED` | 403 | JWT `permissions` claim lacks the required action |
+| `OPERATOR_DISABLED` | 403 | Operator has been disabled; refresh rejected |
+| `INVALID_API_KEY` | 401 | Secret key invalid during session creation |

@@ -1,0 +1,190 @@
+---
+title: Idempotency
+description: Safely handle duplicate wallet callback requests using idempotency keys
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Why Idempotency Matters
+
+Sportuno's retry policy means your wallet endpoints may receive the same request more than once. A network timeout or a 5xx response from your server triggers up to 3 attempts. Without idempotency, a single tournament entry could debit the player multiple times.
+
+Every wallet callback includes an `idempotency_key` field. Your implementation must:
+
+1. Check whether this key has been seen before
+2. If yes, return the original response (without re-executing the operation)
+3. If no, execute the operation, store the key + response, then return the response
+
+## Idempotency Key Format
+
+Sportuno generates idempotency keys as opaque strings (typically ULIDs). Examples:
+
+```
+ik_01JKQMVS3BYWT7FGCE4N
+ik_settle_01JKQMVS3BYWT7FGCE4N
+ik_refund_01JKQMVS3BYWT7FGCE4N
+```
+
+Keys are unique per operation — a rebuy and an entry for the same tournament will have different keys. A retry of the same operation uses the identical key.
+
+## Key Lifetime
+
+Store idempotency keys for at least **24 hours**. After that window, Sportuno will no longer retry the same request, so keys older than 24 hours can be evicted.
+
+<Callout type="info">
+Using a TTL-based store (Redis, database row with `expires_at`) is the simplest approach. Set TTL to 86400 seconds (24 hours).
+</Callout>
+
+## What to Store
+
+For each processed idempotency key, store:
+
+| Field | Description |
+|-------|-------------|
+| `idempotency_key` | The key from the request (primary key) |
+| `response_body` | The full JSON response you returned |
+| `http_status` | The HTTP status code you returned |
+| `created_at` | When the key was first processed |
+| `expires_at` | `created_at + 24h` |
+
+## Implementation Pattern
+
+### Redis (recommended)
+
+```typescript
+class IdempotencyStore {
+  private redis: Redis;
+  private TTL_SECONDS = 86400; // 24 hours
+
+  async checkAndExecute<T>(
+    key: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    // Check cache
+    const cached = await this.redis.get(`idempotency:${key}`);
+    if (cached) {
+      return JSON.parse(cached) as T;
+    }
+
+    // Execute the operation
+    const result = await fn();
+
+    // Store result (fire-and-forget, non-blocking)
+    await this.redis.setEx(
+      `idempotency:${key}`,
+      this.TTL_SECONDS,
+      JSON.stringify(result)
+    );
+
+    return result;
+  }
+}
+```
+
+### PostgreSQL
+
+```sql
+CREATE TABLE idempotency_keys (
+  key         TEXT PRIMARY KEY,
+  response    JSONB NOT NULL,
+  http_status INTEGER NOT NULL DEFAULT 200,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at  TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '24 hours'
+);
+
+-- Cleanup job: DELETE FROM idempotency_keys WHERE expires_at < NOW();
+```
+
+```typescript
+class IdempotencyService {
+  async checkAndStore<T>(
+    key: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    // Check existing
+    const existing = await db
+      .select()
+      .from(idempotencyKeys)
+      .where(eq(idempotencyKeys.key, key))
+      .limit(1);
+
+    if (existing.length > 0) {
+      return existing[0].response as T;
+    }
+
+    // Execute the operation
+    const result = await fn();
+
+    // Store for future replays
+    await db.insert(idempotencyKeys).values({
+      key,
+      response: result,
+      expiresAt: new Date(Date.now() + 86400_000),
+    });
+
+    return result;
+  }
+}
+```
+
+## Using It in Your Endpoint
+
+```typescript
+app.post('/sportuno/players/:id/deduct', hmacMiddleware, async (req, res) => {
+  const { idempotency_key, ...body } = req.body;
+
+  const response = await idempotency.checkAndExecute(
+    idempotency_key,
+    async () => {
+      // This block only runs once per unique key
+      return await walletService.debit({
+        playerId: req.params.id,
+        amount: body.amount,
+        reason: body.reason,
+        sportunoTransactionId: body.transaction_id,
+        reference: body.reference,
+      });
+    }
+  );
+
+  return res.json(response);
+});
+```
+
+## Error Response Caching
+
+<Callout type="warn">
+Only cache **successful** responses (HTTP 200 with `success: true`). Do not cache error responses like `INSUFFICIENT_FUNDS`.
+</Callout>
+
+If the player has insufficient funds, Sportuno will not retry — a 4xx response is treated as final. However, if you accidentally cache a 4xx response and later the player tops up their balance, a retry (which Sportuno won't send but that your code should handle defensively) would incorrectly return the cached failure.
+
+The safest rule: cache on success, not on failure.
+
+```typescript
+async checkAndExecute<T>(key: string, fn: () => Promise<{ success: boolean } & T>) {
+  const cached = await store.get(key);
+  if (cached) return cached;
+
+  const result = await fn();
+
+  // Only cache successful results
+  if (result.success) {
+    await store.set(key, result, TTL_SECONDS);
+  }
+
+  return result;
+}
+```
+
+## Concurrent Requests
+
+If Sportuno sends two identical requests simultaneously (unlikely but possible), your idempotency implementation should handle the race condition. With a database-backed store, use an `INSERT ... ON CONFLICT DO NOTHING` pattern or a unique constraint on the key column. With Redis, use `SET NX EX` (set if not exists with expiry).
+
+```typescript
+// PostgreSQL: insert-or-skip pattern
+await db
+  .insert(idempotencyKeys)
+  .values({ key, response: result, expiresAt })
+  .onConflictDoNothing(); // safe to ignore — another request stored it first
+```

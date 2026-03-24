@@ -1,0 +1,213 @@
+---
+title: Credit Endpoint
+description: POST /sportuno/players/:id/credit — credit a player's wallet for tournament prizes or refunds
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Overview
+
+Sportuno calls this endpoint to add funds to a player's wallet. There are two scenarios:
+
+| Reason | Description |
+|--------|-------------|
+| `TOURNAMENT_RESULT` | Tournament has settled — player receives their prize (may be 0 for non-winners) |
+| `REFUND` | Tournament was cancelled — entry fee is returned to the player |
+
+<Callout type="info">
+Sportuno sends a `TOURNAMENT_RESULT` credit for **every** enrolled player when a tournament settles, including non-winners with `amount: 0`. This closes the accounting cycle and confirms the tournament is fully settled in your ledger.
+</Callout>
+
+## Endpoint
+
+```
+POST /sportuno/players/:id/credit
+```
+
+The `:id` parameter is the player's external ID — the same `player_external_id` your backend provided when creating the widget session.
+
+## Headers
+
+All wallet callbacks include HMAC authentication headers. Verify them before processing. See [HMAC Verification](/docs/wallet-callbacks/hmac-verification).
+
+```http
+Authorization: Bearer {api_key}
+X-Sportuno-Timestamp: 1737740000000
+X-Sportuno-Signature: a3f9e2c1...
+X-Sportuno-Operator-Id: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: application/json
+```
+
+## Request Body
+
+### Tournament Result (winner)
+
+```json
+{
+  "transaction_id": "sp_txn_settle_01JKQMVS",
+  "amount": 500.00,
+  "reason": "TOURNAMENT_RESULT",
+  "original_transaction_id": "sp_txn_01JKQMVS3BYWT7FGCE4N",
+  "reference": {
+    "tournament_id": "tour_01JKQMVS3BYWT7FGCE4N",
+    "tournament_name": "Sunday Slam",
+    "position": 1,
+    "total_participants": 48,
+    "prize_won": true
+  },
+  "idempotency_key": "ik_settle_01JKQMVS"
+}
+```
+
+### Tournament Result (non-winner)
+
+```json
+{
+  "transaction_id": "sp_txn_settle_02JKQMVS",
+  "amount": 0,
+  "reason": "TOURNAMENT_RESULT",
+  "original_transaction_id": "sp_txn_01JKQMVS3BYWT7FGCE4N",
+  "reference": {
+    "tournament_id": "tour_01JKQMVS3BYWT7FGCE4N",
+    "tournament_name": "Sunday Slam",
+    "position": 15,
+    "total_participants": 48,
+    "prize_won": false
+  },
+  "idempotency_key": "ik_settle_02JKQMVS"
+}
+```
+
+### Refund (cancellation)
+
+```json
+{
+  "transaction_id": "sp_txn_refund_01JKQMVS",
+  "amount": 100.00,
+  "reason": "REFUND",
+  "original_transaction_id": "sp_txn_01JKQMVS3BYWT7FGCE4N",
+  "reference": {
+    "tournament_id": "tour_01JKQMVS3BYWT7FGCE4N",
+    "cancellation_reason": "Insufficient participants"
+  },
+  "idempotency_key": "ik_refund_01JKQMVS"
+}
+```
+
+## Request Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `transaction_id` | string | Yes | Sportuno's transaction ID for this credit |
+| `amount` | number | Yes | Amount to credit. Always `>= 0`. Zero for non-winners |
+| `reason` | string | Yes | `TOURNAMENT_RESULT` or `REFUND` |
+| `original_transaction_id` | string | No | The `transaction_id` from the corresponding deduct request |
+| `reference.tournament_id` | string | Yes | UUID of the tournament |
+| `reference.tournament_name` | string | No | Display name of the tournament |
+| `reference.position` | number | No | Final leaderboard position (`TOURNAMENT_RESULT` only) |
+| `reference.total_participants` | number | No | Total players in the tournament |
+| `reference.prize_won` | boolean | No | Whether the player won a prize |
+| `reference.cancellation_reason` | string | No | Why the tournament was cancelled (`REFUND` only) |
+| `idempotency_key` | string | Yes | Unique key for this credit operation |
+
+## Success Response
+
+Return HTTP 200 with:
+
+```json
+{
+  "success": true,
+  "operator_transaction_id": "txn_credit_1234567890",
+  "new_balance": 1350.00
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `true` | Must be the literal boolean `true` |
+| `operator_transaction_id` | string | Your transaction ID |
+| `new_balance` | number | Player's balance after the credit |
+
+<Callout type="info">
+You must return a valid response even for zero-amount credits (`amount: 0`). Create a transaction record with a zero amount and return the player's unchanged balance.
+</Callout>
+
+## Error Responses
+
+### Player Not Found
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "PLAYER_NOT_FOUND",
+    "message": "No player found with external ID player_123"
+  }
+}
+```
+
+<Callout type="warn">
+Unlike the deduct endpoint, the credit endpoint should never return `INSUFFICIENT_FUNDS`. Credits should always succeed for valid players. If your wallet system rejects a credit, return a 500 so Sportuno will retry.
+</Callout>
+
+## Implementation Guide
+
+### Recommended Steps
+
+1. **Verify HMAC** — reject the request immediately if verification fails
+2. **Check idempotency** — if this `idempotency_key` was already processed, return the cached response
+3. **Find the player** — look up by external ID; auto-provision if needed
+4. **Credit atomically** — add the amount to the wallet in a database transaction
+5. **Return the response** — include your internal transaction ID and new balance
+
+### Handling Zero-Amount Credits
+
+```typescript
+// Zero-amount credits must still be acknowledged
+if (amount === 0) {
+  const txn = await db.transactions.create({
+    playerId: player.id,
+    amount: 0,
+    reason: 'TOURNAMENT_RESULT',
+    sportunoTransactionId: transaction_id,
+    reference,
+  });
+
+  // Balance unchanged
+  const wallet = await db.wallets.findByPlayerId(player.id);
+
+  return {
+    success: true,
+    operator_transaction_id: txn.id,
+    new_balance: wallet.balance,
+  };
+}
+```
+
+### Linking Credits to Debits
+
+Use `original_transaction_id` to link the credit back to the original deduct. This is important for reconciliation reports.
+
+```typescript
+// When creating the credit transaction record
+await db.transactions.create({
+  playerId: player.id,
+  amount: +amount,
+  reason,
+  sportunoTransactionId: transaction_id,
+  originalSportunoTransactionId: original_transaction_id, // link back
+  reference,
+});
+```
+
+## Reconciliation Notes
+
+Each credit record should store:
+
+| Field | Source |
+|-------|--------|
+| `sportuno_transaction_id` | `transaction_id` from request |
+| `original_sportuno_transaction_id` | `original_transaction_id` from request |
+| `reference.tournament_id` | `reference.tournament_id` from request |
+| `reference.position` | `reference.position` from request (for prize auditing) |
+| `idempotency_key` | `idempotency_key` from request |

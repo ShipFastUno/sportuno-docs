@@ -1,0 +1,344 @@
+---
+title: Session Management
+description: Create, refresh, and expire Sportuno widget sessions from your backend
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+Widget sessions are short-lived JWTs that authorize a specific player to interact with the tournament widget. All session operations use your secret key (`sk_*`) and must be performed server-side.
+
+<Callout type="warn" title="Server-side only">
+  Session endpoints reject requests that include an `Origin` header. They are designed to be called from your backend, never from browser JavaScript.
+</Callout>
+
+## Create a session
+
+**`POST /v1/widget/sessions`**
+
+Call this endpoint after a player authenticates on your platform.
+
+### Request
+
+```http
+POST /v1/widget/sessions
+Authorization: Bearer sk_live_...
+X-Operator-ID: your-operator-id
+Content-Type: application/json
+
+{
+  "player_external_id": "user-123",
+  "player_display_name": "Alice",
+  "player_currency": "USD",
+  "allowed_origins": ["https://yourplatform.com"],
+  "expiry_seconds": 3600
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `player_external_id` | string | Yes | Your platform's unique identifier for this player. Used to match the player on repeat sessions. |
+| `player_display_name` | string | Yes | Display name shown in tournaments and leaderboards. |
+| `player_currency` | string | Yes | ISO 4217 currency code (e.g. `USD`, `EUR`). |
+| `allowed_origins` | string[] | No | Origins permitted to host the iframe. Defaults to your operator's registered origins. |
+| `expiry_seconds` | integer | No | Session lifetime in seconds. Defaults to the operator-configured value. |
+
+### Response
+
+```json
+{
+  "session_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "widget_url": "https://embed.sportuno.com?clientId=...&playerSessionId=...",
+  "expires_at": "2026-03-24T15:00:00Z",
+  "refresh_before": "2026-03-24T14:50:00Z",
+  "session_id": "a1b2c3d4-..."
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_token` | string | JWT to pass to `window.Sportuno.init()` as `playerSessionId`. |
+| `widget_url` | string | Pre-built iframe URL with query parameters already set. The SDK constructs this URL itself — you do not need to use it directly. |
+| `expires_at` | ISO 8601 | Hard expiry. After this time the token is invalid. |
+| `refresh_before` | ISO 8601 | Recommended refresh time. Refresh the session before this timestamp to avoid `SESSION_EXPIRED` events. |
+| `session_id` | UUID | Stable session identifier for logging and auditing. |
+
+<Callout type="info" title="refresh_before vs expires_at">
+  `refresh_before` is typically 10 minutes before `expires_at`. Schedule your proactive refresh based on `refresh_before`, not `expires_at`, to give yourself a buffer.
+</Callout>
+
+## Refresh a session
+
+**`POST /v1/widget/sessions/refresh`**
+
+Extend an active session before it expires. The response includes a new token with a fresh expiry.
+
+### Request
+
+```http
+POST /v1/widget/sessions/refresh
+Authorization: Bearer sk_live_...
+X-Operator-ID: your-operator-id
+Content-Type: application/json
+
+{
+  "session_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+### Response
+
+```json
+{
+  "session_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expires_at": "2026-03-24T16:00:00Z",
+  "refresh_before": "2026-03-24T15:50:00Z"
+}
+```
+
+After a successful refresh, push the new token to the already-mounted iframe:
+
+```javascript
+window.Sportuno.updateSession({
+  playerSessionId: newSessionToken,
+  gameSessionId: newGameSessionId,
+});
+```
+
+## Session lifecycle
+
+```
+Session created
+      │
+      ├─── refresh_before timestamp approaches
+      │         │
+      │         ▼
+      │    Proactive refresh (schedule with setTimeout)
+      │    POST /v1/widget/sessions/refresh
+      │    → updateSession() with new token
+      │
+      ├─── Token expires without refresh
+      │         │
+      │         ▼
+      │    iframe fires SESSION_EXPIRED PostMessage
+      │    → onSessionExpired() callback fires
+      │    → Attempt refresh
+      │         ├── Success → updateSession()
+      │         └── Failure → closeSession(), show login prompt
+      │
+      └─── Player logs out
+                │
+                ▼
+           window.Sportuno.closeSession()
+           Sends SESSION_LOGOUT to iframe
+```
+
+## Proactive refresh pattern
+
+The recommended approach is to schedule a refresh based on the `refresh_before` timestamp:
+
+```typescript
+function scheduleRefresh(refreshBefore: string) {
+  const refreshAt = new Date(refreshBefore).getTime();
+  const delay = refreshAt - Date.now();
+
+  if (delay <= 0) {
+    // Already past refresh time — refresh immediately
+    doRefresh();
+    return;
+  }
+
+  setTimeout(() => doRefresh(), delay);
+}
+
+async function doRefresh() {
+  const data = await fetch('/api/refresh-widget-session', {
+    method: 'POST',
+  }).then(r => r.json());
+
+  window.Sportuno?.updateSession({
+    playerSessionId: data.sessionToken,
+    gameSessionId: data.gameSessionId,
+  });
+
+  // Schedule the next refresh
+  scheduleRefresh(data.refreshBefore);
+}
+
+// On session creation
+const session = await createWidgetSession();
+scheduleRefresh(session.refreshBefore);
+```
+
+Also handle the case where the tab was backgrounded and the timer never fired:
+
+```typescript
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && refreshBefore) {
+    if (Date.now() >= new Date(refreshBefore).getTime()) {
+      doRefresh();
+    }
+  }
+});
+```
+
+## Backend implementation examples
+
+<Tabs items={["Node.js / Bun", "Python", "Go"]}>
+  <Tab value="Node.js / Bun">
+```typescript
+const SPORTUNO_AUTH_URL = process.env.SPORTUNO_AUTH_URL; // https://api.sportuno.win
+const SPORTUNO_API_KEY = process.env.SPORTUNO_API_KEY;   // sk_live_...
+const SPORTUNO_OPERATOR_ID = process.env.SPORTUNO_OPERATOR_ID;
+
+async function createWidgetSession(player: {
+  id: string;
+  displayName: string;
+  currency: string;
+}) {
+  const response = await fetch(`${SPORTUNO_AUTH_URL}/v1/widget/sessions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SPORTUNO_API_KEY}`,
+      'X-Operator-ID': SPORTUNO_OPERATOR_ID,
+    },
+    body: JSON.stringify({
+      player_external_id: player.id,
+      player_display_name: player.displayName,
+      player_currency: player.currency,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Session creation failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function refreshWidgetSession(sessionToken: string) {
+  const response = await fetch(`${SPORTUNO_AUTH_URL}/v1/widget/sessions/refresh`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SPORTUNO_API_KEY}`,
+      'X-Operator-ID': SPORTUNO_OPERATOR_ID,
+    },
+    body: JSON.stringify({ session_token: sessionToken }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Session refresh failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+```
+  </Tab>
+  <Tab value="Python">
+```python
+import httpx
+import os
+
+SPORTUNO_AUTH_URL = os.environ["SPORTUNO_AUTH_URL"]
+SPORTUNO_API_KEY = os.environ["SPORTUNO_API_KEY"]
+SPORTUNO_OPERATOR_ID = os.environ["SPORTUNO_OPERATOR_ID"]
+
+AUTH_HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {SPORTUNO_API_KEY}",
+    "X-Operator-ID": SPORTUNO_OPERATOR_ID,
+}
+
+async def create_widget_session(player_id: str, display_name: str, currency: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{SPORTUNO_AUTH_URL}/v1/widget/sessions",
+            headers=AUTH_HEADERS,
+            json={
+                "player_external_id": player_id,
+                "player_display_name": display_name,
+                "player_currency": currency,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+async def refresh_widget_session(session_token: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{SPORTUNO_AUTH_URL}/v1/widget/sessions/refresh",
+            headers=AUTH_HEADERS,
+            json={"session_token": session_token},
+        )
+        response.raise_for_status()
+        return response.json()
+```
+  </Tab>
+  <Tab value="Go">
+```go
+package sportuno
+
+import (
+    "bytes"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "os"
+)
+
+var (
+    authURL    = os.Getenv("SPORTUNO_AUTH_URL")
+    apiKey     = os.Getenv("SPORTUNO_API_KEY")
+    operatorID = os.Getenv("SPORTUNO_OPERATOR_ID")
+)
+
+type WidgetSessionResponse struct {
+    SessionToken  string `json:"session_token"`
+    WidgetURL     string `json:"widget_url"`
+    ExpiresAt     string `json:"expires_at"`
+    RefreshBefore string `json:"refresh_before"`
+    SessionID     string `json:"session_id"`
+}
+
+func CreateWidgetSession(playerID, displayName, currency string) (*WidgetSessionResponse, error) {
+    body, _ := json.Marshal(map[string]string{
+        "player_external_id":  playerID,
+        "player_display_name": displayName,
+        "player_currency":     currency,
+    })
+
+    req, _ := http.NewRequest("POST", authURL+"/v1/widget/sessions", bytes.NewBuffer(body))
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Authorization", "Bearer "+apiKey)
+    req.Header.Set("X-Operator-ID", operatorID)
+
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return nil, fmt.Errorf("session creation failed: %w", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("session creation returned %d", resp.StatusCode)
+    }
+
+    var result WidgetSessionResponse
+    json.NewDecoder(resp.Body).Decode(&result)
+    return &result, nil
+}
+```
+  </Tab>
+</Tabs>
+
+## Error handling
+
+| HTTP Status | Meaning | Action |
+|-------------|---------|--------|
+| `401 Unauthorized` | Invalid or missing `Authorization` header | Verify your `sk_*` key is correct and not expired. |
+| `403 Forbidden` | Request has an `Origin` header | This endpoint must be called server-side only. |
+| `422 Unprocessable Entity` | Missing required fields | Check that `player_external_id`, `player_display_name`, and `player_currency` are all present. |
+| `429 Too Many Requests` | Rate limit exceeded | Back off and retry after the `Retry-After` header value. |
+| `500 Internal Server Error` | Sportuno-side error | Retry with exponential backoff. |

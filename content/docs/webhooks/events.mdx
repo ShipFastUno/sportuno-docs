@@ -1,0 +1,179 @@
+---
+title: Webhook Events
+description: Full payload schemas for all Sportuno webhook events
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Event Envelope
+
+All events share the same outer structure:
+
+```json
+{
+  "event_type": "tournament.joined",
+  "event_id": "evt_01JKQMVS3BYWT7FGCE4N",
+  "data": { ... }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_type` | string | Identifies the event — see table below |
+| `event_id` | string | Globally unique event ID — use as idempotency key |
+| `data` | object | Event-specific payload |
+
+## Available Events
+
+| Event | When Fired |
+|-------|-----------|
+| `tournament.joined` | A player successfully enrolls in a tournament |
+| `tournament.settled` | A tournament completes and prize distribution is finalised |
+| `tournament.cancelled` | A tournament is cancelled before or during play |
+
+---
+
+## tournament.joined
+
+Fired when a player successfully completes tournament enrollment. This event fires **after** the deduct wallet callback succeeds — the player's entry fee has already been collected at this point.
+
+### Payload
+
+```json
+{
+  "event_type": "tournament.joined",
+  "event_id": "evt_01JKQMVS3BYWT7FGCE4N",
+  "data": {
+    "tournament_id": "tour_01JKQMVS3BYWT7FGCE4N",
+    "player_id": "player_123",
+    "tournament_name": "Sunday Slam",
+    "entry_fee": 100.00,
+    "enrolled_at": "2026-03-24T10:00:00Z"
+  }
+}
+```
+
+### Data Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tournament_id` | string | UUID of the tournament the player joined |
+| `player_id` | string | Player's external ID (as provided in the widget session) |
+| `tournament_name` | string | Display name of the tournament |
+| `entry_fee` | number | The entry fee amount that was collected |
+| `enrolled_at` | string | ISO-8601 timestamp of enrollment |
+
+### Use Cases
+
+- Send a confirmation email or push notification to the player
+- Increment a `tournaments_joined` counter on the player's profile
+- Update your analytics or CRM with tournament participation data
+
+---
+
+## tournament.settled
+
+Fired when a tournament completes, all bets are settled, and prize distribution is finalised. Sportuno also sends [credit wallet callbacks](/docs/wallet-callbacks/credit) for each player around the same time — the webhook is informational; the credit callback is the authoritative financial record.
+
+<Callout type="info">
+You will receive one `tournament.settled` webhook per player, not one per tournament. If 48 players participate, you receive 48 `tournament.settled` events.
+</Callout>
+
+### Payload
+
+```json
+{
+  "event_type": "tournament.settled",
+  "event_id": "evt_settle_01JKQMVS3BYWT7FGCE4N",
+  "data": {
+    "tournament_id": "tour_01JKQMVS3BYWT7FGCE4N",
+    "player_id": "player_123",
+    "tournament_name": "Sunday Slam",
+    "prize_amount": 500.00,
+    "final_position": 1,
+    "total_participants": 48,
+    "settled_at": "2026-03-24T18:00:00Z"
+  }
+}
+```
+
+### Data Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tournament_id` | string | UUID of the settled tournament |
+| `player_id` | string | Player's external ID |
+| `tournament_name` | string | Display name of the tournament |
+| `prize_amount` | number | Prize amount credited to the player (0 for non-winners) |
+| `final_position` | number | Player's final leaderboard position |
+| `total_participants` | number | Total number of enrolled players |
+| `settled_at` | string | ISO-8601 timestamp of settlement |
+
+### Use Cases
+
+- Send a results notification to the player (winner or not)
+- Update tournament history in your player profile
+- Reconcile prize amounts against your wallet credit transactions
+- Update leaderboards or achievement systems
+
+---
+
+## tournament.cancelled
+
+Fired when a tournament is cancelled. A cancellation may happen before the tournament starts (e.g., insufficient participants) or mid-tournament (e.g., data feed failure). Sportuno sends [refund credit callbacks](/docs/wallet-callbacks/credit) for each enrolled player — the webhook is informational.
+
+<Callout type="info">
+Like `tournament.settled`, you receive one `tournament.cancelled` event per enrolled player.
+</Callout>
+
+### Payload
+
+```json
+{
+  "event_type": "tournament.cancelled",
+  "event_id": "evt_cancel_01JKQMVS3BYWT7FGCE4N",
+  "data": {
+    "tournament_id": "tour_01JKQMVS3BYWT7FGCE4N",
+    "player_id": "player_123",
+    "tournament_name": "Sunday Slam",
+    "refund_amount": 100.00,
+    "reason": "Insufficient participants",
+    "cancelled_at": "2026-03-24T09:00:00Z"
+  }
+}
+```
+
+### Data Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tournament_id` | string | UUID of the cancelled tournament |
+| `player_id` | string | Player's external ID |
+| `tournament_name` | string | Display name of the tournament |
+| `refund_amount` | number | Amount refunded to the player's wallet |
+| `reason` | string | Human-readable cancellation reason |
+| `cancelled_at` | string | ISO-8601 timestamp of cancellation |
+
+### Cancellation Reasons
+
+Common values for `reason`:
+
+| Reason | Description |
+|--------|-------------|
+| `Insufficient participants` | Not enough players enrolled before start |
+| `Data feed failure` | Sports data unavailable for the tournament |
+| `Administrative cancellation` | Cancelled by Sportuno operations team |
+
+### Use Cases
+
+- Notify the player that the tournament was cancelled and their entry fee refunded
+- Update tournament history with cancelled status
+- Verify the refund credit callback was processed in your wallet
+
+---
+
+## Testing Events
+
+In the UAT environment, you can trigger test events from the [Sportuno backoffice](https://backoffice-uat.sportuno.win). Navigate to your operator settings and use the "Send Test Webhook" tool to fire any event type with a synthetic payload.
+
+See [Testing Guide](/docs/guides/testing) for full sandbox instructions.

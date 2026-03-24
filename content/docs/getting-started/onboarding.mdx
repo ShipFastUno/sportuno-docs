@@ -1,0 +1,165 @@
+---
+title: Get Credentials
+description: How to request your operator account, receive API keys, and prepare for integration
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+This page explains how to obtain the credentials needed to integrate Sportuno into your platform.
+
+---
+
+## What You Will Receive
+
+Once your operator account is provisioned, Sportuno will provide:
+
+| Credential | Format | Used for |
+|-----------|--------|---------|
+| Operator ID | UUID (`xxxxxxxx-xxxx-...`) | `X-Operator-ID` header on all server-to-server calls; `clientId` in the widget SDK |
+| Secret API key (test) | `sk_test_...` | Server-side session creation against UAT |
+| Public API key (test) | `pk_test_...` | Widget SDK initialization in UAT |
+| Secret API key (live) | `sk_live_...` | Server-side session creation in production |
+| Public API key (live) | `pk_live_...` | Widget SDK initialization in production |
+| HMAC secret | random string | Verify incoming wallet callback signatures |
+
+<Callout type="warn">
+Treat `sk_*` keys and the HMAC secret the same as passwords. Store them in a secrets manager or environment variable vault — never commit them to source control.
+</Callout>
+
+---
+
+## Onboarding Steps
+
+<Steps>
+
+<Step>
+
+## Contact Sportuno
+
+Reach out to your Sportuno account manager or email **partnerships@sportuno.com** to start the onboarding process.
+
+Include the following in your request:
+
+- Company name and website
+- Technical contact (name + email) for API integration
+- Intended markets and supported currencies (ISO 4217)
+- Approximate monthly active players
+- List of domains where the widget will be embedded
+
+</Step>
+
+<Step>
+
+## Complete Operator Agreement
+
+Sportuno will send a platform agreement covering:
+
+- Revenue share or flat-fee arrangement
+- Wallet responsibility and liability terms
+- Supported jurisdictions and compliance requirements
+- SLA and incident response expectations
+
+Sign and return the agreement to proceed.
+
+</Step>
+
+<Step>
+
+## Receive UAT Credentials
+
+Once the agreement is countersigned, your account manager will provision a test operator account on the UAT environment and send:
+
+- Your **Operator ID** (UUID)
+- Your **UAT API keys** (`sk_test_*` and `pk_test_*`)
+- Your **HMAC secret** for wallet callback verification
+- UAT environment base URLs
+
+You can begin integration immediately against UAT. No production access is required for development.
+
+</Step>
+
+<Step>
+
+## Complete Integration Review
+
+Before production credentials are issued, Sportuno conducts a lightweight integration review:
+
+1. **Wallet callback endpoints** — Sportuno verifies your debit/credit endpoints respond correctly to test payloads
+2. **Session creation** — Confirm your server-side session creation handles errors and token expiry correctly
+3. **Origin allowlist** — Verify `allowed_origins` is set correctly for your production domains
+4. **Security review** — Confirm `sk_*` keys are server-side only and HMAC verification is implemented
+
+The review typically takes 1–3 business days.
+
+</Step>
+
+<Step>
+
+## Receive Production Credentials
+
+After the integration review passes, Sportuno provisions your production account and provides:
+
+- **Live API keys** (`sk_live_*` and `pk_live_*`)
+- Production environment base URLs (`api.sportuno.com` and `embed.sportuno.com`)
+- Go-live checklist and monitoring contacts
+
+</Step>
+
+</Steps>
+
+---
+
+## Credential Management
+
+### Storing Credentials Securely
+
+Store all secrets as environment variables, never in code:
+
+```bash
+# Server-side environment variables (never expose to browser)
+SPORTUNO_API_KEY=sk_live_your_secret_key
+SPORTUNO_OPERATOR_ID=your-operator-uuid
+SPORTUNO_AUTH_URL=https://api.sportuno.com
+SPORTUNO_API_SECRET=your-hmac-secret
+
+# Public variables (safe for browser, no sk_ keys)
+NEXT_PUBLIC_SPORTUNO_API_KEY=pk_live_your_public_key
+NEXT_PUBLIC_SPORTUNO_CLIENT_ID=your-operator-uuid
+NEXT_PUBLIC_SPORTUNO_EMBED_URL=https://embed.sportuno.com
+```
+
+<Callout type="info">
+In Next.js, any variable prefixed `NEXT_PUBLIC_` is bundled into the browser JavaScript. Only ever set `pk_*` (public) keys with a `NEXT_PUBLIC_` prefix. Secret keys must use names **without** `NEXT_PUBLIC_`.
+</Callout>
+
+### Rotating API Keys
+
+If a secret key is compromised:
+
+1. Contact Sportuno support immediately at **security@sportuno.com**
+2. Sportuno will issue a new key pair and set a short deprecation window on the old key
+3. Update your environment variables and redeploy
+4. Confirm the old key is revoked with Sportuno support
+
+---
+
+## Testing Without a Sportuno Account
+
+If you want to explore the API shape before credentials are issued:
+
+- The OpenAPI specification is publicly available at `https://api-uat.sportuno.win/v1/.well-known/openapi.json`
+- You can import it into Postman, Insomnia, or Scalar to browse endpoint schemas
+
+Note that all authenticated endpoints will return `401` without valid credentials.
+
+---
+
+## Support
+
+| Contact | For |
+|---------|-----|
+| Your account manager | Commercial questions, onboarding timeline |
+| **integrations@sportuno.com** | Technical integration questions |
+| **security@sportuno.com** | Key compromise, security concerns |
+| Status page: **status.sportuno.com** | Incident and uptime information |

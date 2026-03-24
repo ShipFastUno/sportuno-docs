@@ -1,0 +1,274 @@
+---
+title: JavaScript SDK
+description: Complete reference for the window.Sportuno API — init, updateSession, closeSession, and setLanguage
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+The Sportuno JavaScript SDK is a lightweight loader script that mounts the tournament iframe into your page and manages the communication channel between your frontend and the embed.
+
+## Loading the SDK
+
+Add a container element to your page and load the SDK script from the Sportuno CDN:
+
+```html
+<!-- 1. Container for the iframe -->
+<div id="sportuno-iframe-container" style="width: 100%; height: 100%;"></div>
+
+<!-- 2. SDK script (async) -->
+<script
+  id="sportuno"
+  src="{EMBED_URL}/sportuno-embed/v1.0.0/index.js"
+  async
+></script>
+```
+
+Replace `{EMBED_URL}` with the embed origin provided to you during onboarding (for example `https://embed.sportuno.com`).
+
+<Callout type="info" title="Load once per page">
+  The SDK guards against duplicate initialization. If `window.Sportuno` is already set when the script loads, it exits silently. Load the script once and call `init()` once per page lifecycle.
+</Callout>
+
+## Initialization
+
+Call `window.Sportuno.init()` inside the script's `onload` handler, after your session is ready:
+
+```javascript
+script.onload = function () {
+  window.Sportuno.init({
+    clientId: 'your-client-id',
+    apiKey: 'pk_live_...',
+    language: 'en',
+    playerSessionId: sessionToken,   // from your backend session creation
+    onSessionExpired: function () {
+      // refresh your session and call updateSession()
+    },
+    onIframeReady: function () {
+      // iframe has loaded and is ready to accept interactions
+    },
+  });
+};
+```
+
+### Init config reference
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `clientId` | `string` | Yes | Client identifier assigned to your operator account during onboarding. |
+| `apiKey` | `string` | No | Public API key (`pk_*`). Required for catalog reads within the widget. |
+| `language` | `'en' \| 'pt'` | No | UI language. Defaults to `'en'`. |
+| `playerSessionId` | `string` | No | Session token returned by your backend from `POST /v1/widget/sessions`. Omit for anonymous (view-only) sessions. |
+| `containerId` | `string` | No | ID of the DOM element that will hold the iframe. Defaults to `'sportuno-iframe-container'`. |
+| `queryParams` | `Record<string, string>` | No | Extra query parameters forwarded to the embed URL. See [query parameters](#query-parameters) below. |
+| `onSessionExpired` | `() => void` | No | Called when the iframe emits `SESSION_EXPIRED`. Use this to refresh the session and call `updateSession()`. |
+| `onIframeReady` | `() => void` | No | Called once the iframe has loaded and sent `IFRAME_READY`. Use this to hide loading spinners. |
+
+### Query parameters
+
+The `queryParams` object supports the following keys:
+
+| Key | Values | Description |
+|-----|--------|-------------|
+| `join` | `'leaderboard'` | Deep-link directly to the leaderboard view on load. Requires `subLeaderboardId`. |
+| `subLeaderboardId` | string (UUID) | ID of the sub-leaderboard to open. Used together with `join: 'leaderboard'`. |
+| `tournamentId` | string (UUID) | Pre-select a specific tournament on load. |
+
+<Callout type="info">
+  Deep-link query parameters (`join`, `tournamentId`, `subLeaderboardId`) are removed from the browser URL via `history.replaceState` after the iframe is mounted so they do not persist on page reload.
+</Callout>
+
+## Methods
+
+### `window.Sportuno.updateSession(payload)`
+
+Push new session tokens to the iframe. Call this after creating or refreshing a session while the iframe is already mounted.
+
+```typescript
+window.Sportuno.updateSession({
+  playerSessionId: 'new-session-token',
+  gameSessionId: 'game-session-id',
+});
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `playerSessionId` | `string` | New player session token from `POST /v1/widget/sessions`. |
+| `gameSessionId` | `string` | Game session ID returned alongside the session token. |
+
+This sends a `SESSION_SET_TOKEN` PostMessage to the iframe. If either value is empty, `closeSession()` is called automatically to clean up.
+
+---
+
+### `window.Sportuno.closeSession()`
+
+Log the player out of the iframe. Clears stored session tokens and sends a `SESSION_LOGOUT` PostMessage to the iframe.
+
+```javascript
+window.Sportuno.closeSession();
+```
+
+Call this when the player logs out of your platform.
+
+---
+
+### `window.Sportuno.setLanguage(code)`
+
+Switch the iframe UI language at runtime without remounting.
+
+```javascript
+window.Sportuno.setLanguage('pt');
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `code` | `'en' \| 'pt'` | Language code to switch to. Unsupported codes are ignored silently. |
+
+Sends an `UPDATE_LANGUAGE` PostMessage to the iframe. If the language is already set to the requested code, the call is a no-op.
+
+---
+
+## TypeScript types
+
+If you are using TypeScript, add these global types to your project:
+
+```typescript
+// types/global.d.ts
+export {};
+
+declare global {
+  interface Window {
+    Sportuno?: {
+      init: (config: {
+        clientId: string;
+        apiKey?: string;
+        language?: string;
+        playerSessionId?: string;
+        containerId?: string;
+        queryParams?: Record<string, string>;
+        onSessionExpired?: () => void;
+        onIframeReady?: () => void;
+      }) => void;
+      updateSession: (payload: {
+        playerSessionId: string;
+        gameSessionId: string;
+      }) => void;
+      closeSession: () => void;
+      setLanguage: (lang: string) => void;
+    };
+  }
+}
+```
+
+## Full integration example
+
+<Tabs items={["Vanilla JS", "React"]}>
+  <Tab value="Vanilla JS">
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>My Platform</title>
+</head>
+<body>
+  <div
+    id="sportuno-iframe-container"
+    style="width: 100%; height: 600px;"
+  ></div>
+
+  <script>
+    // Fetch your session token from your BFF
+    fetch('/api/create-widget-session')
+      .then(res => res.json())
+      .then(({ sessionToken }) => {
+        const script = document.createElement('script');
+        script.id = 'sportuno';
+        script.src = 'https://embed.sportuno.com/sportuno-embed/v1.0.0/index.js';
+        script.async = true;
+        script.onload = function () {
+          window.Sportuno.init({
+            clientId: 'your-client-id',
+            apiKey: 'pk_live_...',
+            language: 'en',
+            playerSessionId: sessionToken,
+            onSessionExpired: function () {
+              fetch('/api/refresh-widget-session', { method: 'POST' })
+                .then(res => res.json())
+                .then(({ sessionToken: newToken, gameSessionId }) => {
+                  window.Sportuno.updateSession({
+                    playerSessionId: newToken,
+                    gameSessionId,
+                  });
+                });
+            },
+            onIframeReady: function () {
+              document.getElementById('loading-spinner').style.display = 'none';
+            },
+          });
+        };
+        document.body.appendChild(script);
+      });
+  </script>
+</body>
+</html>
+```
+  </Tab>
+  <Tab value="React">
+```tsx
+import { useEffect, useRef } from 'react';
+
+interface WidgetProps {
+  sessionToken: string;
+  gameSessionId: string;
+  onSessionExpired: () => void;
+}
+
+export function SportunoWidget({
+  sessionToken,
+  gameSessionId,
+  onSessionExpired,
+}: WidgetProps) {
+  const isMounted = useRef(false);
+
+  useEffect(() => {
+    if (isMounted.current) return;
+
+    const script = document.createElement('script');
+    script.id = 'sportuno';
+    script.src = 'https://embed.sportuno.com/sportuno-embed/v1.0.0/index.js';
+    script.async = true;
+    script.onload = () => {
+      if (window.Sportuno) {
+        window.Sportuno.init({
+          clientId: process.env.NEXT_PUBLIC_CLIENT_ID!,
+          apiKey: process.env.NEXT_PUBLIC_SPORTUNO_API_KEY!,
+          language: 'en',
+          playerSessionId: sessionToken,
+          onSessionExpired,
+          onIframeReady: () => {
+            isMounted.current = true;
+          },
+        });
+      }
+    };
+    document.body.appendChild(script);
+  }, []);
+
+  // Push new tokens when they change (e.g. after a refresh)
+  useEffect(() => {
+    if (isMounted.current && window.Sportuno?.updateSession) {
+      window.Sportuno.updateSession({ playerSessionId: sessionToken, gameSessionId });
+    }
+  }, [sessionToken, gameSessionId]);
+
+  return (
+    <div
+      id="sportuno-iframe-container"
+      style={{ width: '100%', height: '100%' }}
+    />
+  );
+}
+```
+  </Tab>
+</Tabs>

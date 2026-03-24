@@ -1,0 +1,141 @@
+---
+title: Realtime Overview
+description: Ably-based realtime infrastructure — architecture, token issuance, and capabilities
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Architecture
+
+Sportuno's realtime system is built on [Ably](https://ably.com), a managed pub/sub platform. The Sportuno backend publishes market updates, leaderboard changes, and player events to Ably channels. The widget subscribes to those channels to render live data without polling.
+
+```text
+Sportuno Backend
+      │
+      │  publishes via Ably SDK
+      ▼
+   Ably Cloud
+      │
+      │  fan-out to subscribers
+      ▼
+Sportuno Widget (in iframe)
+  └── Ably client (subscribes to channels)
+```
+
+As an operator, you do not interact directly with Ably in most integration scenarios — the widget manages its own Ably connection. However, if you are building a custom frontend or need to consume Sportuno data in your own UI, you can obtain an Ably token and subscribe to channels directly.
+
+## Token Issuance
+
+The Sportuno API issues short-lived Ably capability tokens. These tokens restrict which channels the bearer can subscribe to, based on their authentication level.
+
+### Endpoint
+
+```
+POST /v1/realtime/token
+```
+
+This endpoint requires a widget JWT in the `Authorization` header. The widget calls this automatically when it needs an Ably connection.
+
+### Request
+
+```http
+POST /v1/realtime/token
+Authorization: Bearer {widget_jwt}
+Content-Type: application/json
+```
+
+No request body is required.
+
+### Response
+
+```json
+{
+  "token": "eyJhbGciOiJSUzI1NiIs...",
+  "expires_at": "2026-03-24T10:15:00Z",
+  "channel_prefix": "sportuno"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `token` | Short-lived Ably capability token |
+| `expires_at` | Token expiry (ISO-8601) |
+| `channel_prefix` | Prefix used on all Sportuno Ably channels |
+
+### Token TTL by Authentication Level
+
+| Auth Type | TTL |
+|-----------|-----|
+| Widget JWT (authenticated player) | 900 seconds (15 min) |
+| Public key (`pk_*`) | 1800 seconds (30 min) |
+| Secret key (`sk_*`) | 3600 seconds (1 hour) |
+
+The widget automatically requests a new token before the current one expires.
+
+## Connecting with the Ably SDK
+
+If you are subscribing to channels from your own code (outside the widget):
+
+```typescript
+import Ably from 'ably';
+
+// Fetch a token from the Sportuno API
+const tokenResponse = await fetch('https://api.sportuno.win/v1/realtime/token', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${widgetJwt}`,
+  },
+});
+const { token } = await tokenResponse.json();
+
+// Initialize Ably with the token
+const client = new Ably.Realtime({ token });
+
+// Subscribe to a channel
+const channel = client.channels.get('sportuno:tournament:tour_01JKQMVS');
+channel.subscribe('leaderboard.updated', (message) => {
+  console.log('Leaderboard update:', message.data);
+});
+```
+
+<Callout type="info">
+All Sportuno Ably channel names are prefixed with `sportuno:`. See [Channels](/docs/realtime/channels) for the full channel namespace reference.
+</Callout>
+
+## Capability Model
+
+Ably tokens issued by Sportuno carry capability restrictions that determine which channels can be subscribed to and what operations are permitted.
+
+| Operation | Meaning |
+|-----------|---------|
+| `subscribe` | Receive messages published to the channel |
+| `presence` | Join the presence set on the channel (see who is connected) |
+
+The capability set in a token depends on how the token was requested:
+
+| Token Type | Channels Accessible | Operations |
+|------------|---------------------|------------|
+| `pk_*` public key | Public channels only | subscribe |
+| Widget JWT (authenticated) | Public + player-specific channels | subscribe + presence |
+
+See [Channels & Capabilities](/docs/realtime/channels) for the full breakdown.
+
+## Connection Lifecycle
+
+The Ably connection is managed by the widget. You do not need to manage connection state unless you are subscribing from custom code. In that case, handle these Ably connection states:
+
+| State | Meaning | Action |
+|-------|---------|--------|
+| `connected` | Active connection | Normal operation |
+| `disconnected` | Temporary loss | Ably auto-reconnects |
+| `suspended` | Extended outage | Ably retries on a longer schedule |
+| `failed` | Permanent failure | Re-authenticate and reconnect |
+| `closed` | Intentionally closed | Reconnect if needed |
+
+```typescript
+client.connection.on('failed', async () => {
+  // Token may have expired — fetch a new one
+  const { token } = await fetchSportunoRealtimeToken();
+  await client.auth.authorize({ token });
+});
+```

@@ -1,0 +1,124 @@
+---
+title: Introduction
+description: What Sportuno is, how it works, and how your platform integrates with it
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+## What is Sportuno?
+
+Sportuno is a white-label sports betting tournament platform for operators. You embed a single widget into your site; Sportuno handles the entire player experience — tournament browsing, enrollment, betting, rebuys, add-ons, and leaderboards.
+
+Your integration responsibilities are minimal:
+
+- **One server-side API call** to create a widget session per player visit
+- **A script tag and container div** to render the widget in your frontend
+- **Wallet callback endpoints** on your server to process debits and credits
+
+Everything inside the widget — catalog, odds, bet slip, settlement, real-time updates — is owned and operated by Sportuno.
+
+## Architecture Overview
+
+```text
+                    Your Platform
+┌─────────────────────────────────────────────────┐
+│                                                 │
+│  Your Backend                                   │
+│  ┌──────────────┐                               │
+│  │  POST        │──── sk_* API key ────────────►│──► Sportuno Auth API
+│  │  /widget/    │◄─── session_token ────────────│◄── (session_token + widget_url)
+│  │  sessions    │                               │
+│  └──────┬───────┘                               │
+│         │ session_token                         │
+│         ▼                                       │
+│  Your Frontend                                  │
+│  ┌──────────────────────────────────────────┐   │
+│  │  <script src="...sportuno-embed...">     │   │
+│  │  window.Sportuno.init({                  │   │
+│  │    playerSessionId: session_token,  ─────────►  Sportuno Embed CDN
+│  │    ...                              ◄─────────  (iframe rendered here)
+│  │  })                                      │   │
+│  └──────────────────────────────────────────┘   │
+│                                                 │
+└─────────────────────────────────────────────────┘
+
+                    Sportuno Infrastructure
+┌─────────────────────────────────────────────────┐
+│                                                 │
+│  Auth API  ──► Edge API  ──► All Services       │
+│  (sessions)    (widget JWT)   (catalog, betting, │
+│                               settlement, etc.)  │
+│                                                 │
+│  Wallet Callbacks ────────────────────────────► │
+│  POST /wallet/debit  (your server)              │
+│  POST /wallet/credit (your server)              │
+│                                                 │
+└─────────────────────────────────────────────────┘
+```
+
+### How the two sides communicate
+
+| Direction | Mechanism | Auth |
+|-----------|-----------|------|
+| Your backend → Sportuno | HTTPS REST | `sk_*` secret key |
+| Sportuno widget → Sportuno | HTTPS REST + WebSocket | Widget JWT (issued by session create) |
+| Sportuno → Your backend | HTTPS webhooks / wallet callbacks | HMAC signature |
+| Your frontend → Sportuno CDN | Script tag | `pk_*` public key |
+
+<Callout type="info">
+Your secret key (`sk_*`) must **never** appear in browser code. All calls using a secret key must originate from your server.
+</Callout>
+
+## Key Concepts
+
+### Operator
+
+An operator is a platform that has contracted with Sportuno to embed the tournament product. Each operator has a UUID (`operator_id`) and a pair of API keys per environment (test and live).
+
+### Widget Session
+
+A widget session is a short-lived JWT issued by Sportuno that identifies a specific player on a specific operator. Your backend creates one per player per session; the frontend passes it to the widget SDK on initialization.
+
+Sessions expire after 30 minutes by default (configurable 5–60 minutes). The widget refreshes its own session automatically — no polling required on your side.
+
+### API Keys
+
+| Prefix | Type | Used by | Purpose |
+|--------|------|---------|---------|
+| `pk_live_*` | Public live | Browser / SDK | Identify your operator in the widget (non-secret) |
+| `sk_live_*` | Secret live | Your server only | Create widget sessions, server-to-server calls |
+| `pk_test_*` | Public test | Browser / SDK (UAT) | Same as `pk_live_*` but sandbox environment |
+| `sk_test_*` | Secret test | Your server only (UAT) | Same as `sk_live_*` but sandbox environment |
+
+### Wallet Callbacks
+
+When a player enrolls, rebuys, or claims a prize, Sportuno calls your backend to debit or credit their wallet. You implement two endpoints and Sportuno calls them with an HMAC-signed payload. This keeps wallet balances within your system — Sportuno never holds player funds.
+
+## What You Build vs What Sportuno Provides
+
+| Responsibility | Owner |
+|----------------|-------|
+| Session creation endpoint | You |
+| Wallet debit / credit endpoints | You |
+| Player authentication on your site | You |
+| Widget embed (script + container) | You |
+| Tournament catalog and odds | Sportuno |
+| Bet placement and settlement | Sportuno |
+| Enrollment / rebuy / add-on flows | Sportuno |
+| Leaderboards and real-time updates | Sportuno |
+| Session token refresh | Sportuno (widget handles it) |
+
+## Next Steps
+
+<Cards>
+  <Card title="Quickstart" href="/docs/getting-started/quickstart">
+    Get integrated in 5 minutes with code examples
+  </Card>
+  <Card title="Get Credentials" href="/docs/getting-started/onboarding">
+    Request your operator account and API keys
+  </Card>
+  <Card title="Environments" href="/docs/getting-started/environments">
+    UAT sandbox vs production — what differs and how to switch
+  </Card>
+</Cards>

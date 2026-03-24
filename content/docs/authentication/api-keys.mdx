@@ -1,0 +1,183 @@
+---
+title: API Keys
+description: API key formats, types, scopes, and lifecycle management for Sportuno operator integrations.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Key Format
+
+All Sportuno API keys follow the same structure:
+
+```
+{type}_{env}_{43-char-base64url}
+```
+
+| Segment | Values | Example |
+|---------|--------|---------|
+| `type` | `pk`, `sk`, `rk` | `sk` |
+| `env` | `live`, `test` | `live` |
+| 43-char token | 256-bit random value, base64url encoded | `aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789ABC` |
+
+Full example: `sk_live_<43-character-base64url-token>`
+
+The 43-character segment is a URL-safe base64 encoding of 256 bits of cryptographically random data. Keys are stored as Argon2id hashes — the plaintext is shown exactly once, at creation.
+
+## Key Types
+
+### Publishable Keys (`pk_*`)
+
+Publishable keys are browser-safe. Embed them in your widget configuration and client-side JavaScript.
+
+| Prefix | Environment |
+|--------|-------------|
+| `pk_live_*` | Production |
+| `pk_test_*` | Sandbox |
+| `pk_f2p_*` | Free-to-play (no real-money flows) |
+
+**Capabilities:**
+- Read tournaments, events, markets, odds
+- Read leaderboards
+- Initialise the widget (combined with a Widget JWT for player actions)
+
+**Security:** Every request carrying a `pk_*` key is checked against the `allowed_domains` list registered for that key. Requests from unlisted origins receive `403 DOMAIN_NOT_ALLOWED`. Wildcard subdomains are supported (`*.operator.com`).
+
+### Secret Keys (`sk_*`)
+
+Secret keys have full operator-level access and must never leave your server.
+
+| Prefix | Environment |
+|--------|-------------|
+| `sk_live_*` | Production |
+| `sk_test_*` | Sandbox |
+
+**Capabilities:**
+- All Tier 1 catalog reads
+- Create and refresh widget sessions
+- Server-to-server operations
+
+**Security:** Any request carrying a `sk_*` key that also includes an `Origin` header is rejected with `403 SECRET_KEY_FROM_BROWSER`. This prevents accidental exposure via browser-side code.
+
+<Callout type="error" title="Secret keys must stay on your server">
+If a secret key is ever observed in browser network traffic, revoke it immediately from the backoffice dashboard and issue a new key. See [Key Rotation](#key-rotation) below.
+</Callout>
+
+### Restricted Keys (`rk_*`)
+
+Restricted keys are scoped-down secret keys, suitable for third-party services or internal microservices that should not hold full operator credentials.
+
+| Prefix | Environment |
+|--------|-------------|
+| `rk_live_*` | Production |
+| `rk_test_*` | Sandbox |
+
+**Scopes** control what a restricted key may do:
+
+| Scope | Permitted operations |
+|-------|---------------------|
+| `tournaments:read` | Read tournament data |
+| `tournaments:write` | Create and modify tournaments |
+| `events:read` | Read event data |
+| `events:*` | Full event management |
+| `leaderboards:read` | Read leaderboard data |
+| `sessions:create` | Create widget sessions |
+| `sessions:refresh` | Refresh widget sessions |
+
+A key with only `leaderboards:read` scope that attempts a `POST /v1/widget/sessions` call receives `403 SCOPE_DENIED`.
+
+Whether a restricted key is browser-safe depends on its scopes. Keys with write or session scopes should be treated as secrets.
+
+## Creating API Keys
+
+API keys are created through the backoffice API. **The plaintext key value is returned exactly once** in the creation response. Store it securely — it cannot be retrieved again.
+
+```http
+POST /admin/operators/{operator_id}/api-keys
+Authorization: Bearer <admin-jwt>
+
+{
+  "key_type": "publishable",
+  "environment": "live",
+  "label": "Production widget",
+  "allowed_domains": ["app.example.com", "*.example.com"],
+  "ip_whitelist": [],
+  "scopes": []
+}
+```
+
+Response:
+
+```json
+{
+  "key_id": "550e8400-e29b-41d4-a716-446655440001",
+  "key": "pk_live_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789ABC",
+  "label": "Production widget",
+  "created_at": "2026-03-24T10:00:00Z"
+}
+```
+
+<Callout type="warn" title="Save the key now">
+The `key` field is only present in the creation response. Subsequent GET requests for the key return metadata only — the plaintext value is not stored.
+</Callout>
+
+## Managing API Keys
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/operators/{id}/api-keys` | GET | List all keys for the operator |
+| `/admin/operators/{id}/api-keys` | POST | Create a new key |
+| `/admin/operators/{id}/api-keys/{key_id}` | GET | Get key metadata |
+| `/admin/operators/{id}/api-keys/{key_id}/revoke` | POST | Revoke immediately |
+| `/admin/operators/{id}/api-keys/{key_id}/rotate` | POST | Rotate with grace period |
+
+## Key Rotation
+
+Key rotation allows you to replace a key without downtime by running the old and new keys in parallel for a configurable grace period.
+
+**Rotation flow:**
+
+1. Call the rotate endpoint with a `grace_period_days` value (default: 7).
+2. A new key is created with the same properties (type, scopes, domain list).
+3. The old key remains valid until the grace period ends.
+4. Deploy the new key to your infrastructure during the grace period.
+5. After the grace period, the old key is automatically invalidated.
+
+```http
+POST /admin/operators/{id}/api-keys/{key_id}/rotate
+Authorization: Bearer <admin-jwt>
+
+{
+  "grace_period_days": 7
+}
+```
+
+Response includes the new key plaintext and the expiry timestamp of the old key.
+
+<Callout type="info">
+The edge-API key cache is invalidated immediately on rotation, so the new key is valid within seconds. The old key continues to work via the grace period until expiry.
+</Callout>
+
+## Immediate Revocation
+
+To revoke a key without a grace period — for example after a suspected leak — call the revoke endpoint:
+
+```http
+POST /admin/operators/{id}/api-keys/{key_id}/revoke
+Authorization: Bearer <admin-jwt>
+```
+
+Revocation takes effect within the edge-API cache TTL (up to 5 minutes by default). For faster effect, the cache can be invalidated directly.
+
+## Error Reference
+
+| Error code | HTTP status | Cause |
+|-----------|-------------|-------|
+| `INVALID_API_KEY` | 401 | Key not found in the database |
+| `OPERATOR_MISMATCH` | 403 | `X-Operator-ID` does not match the key owner |
+| `OPERATOR_DISABLED` | 403 | The operator account is inactive |
+| `MISSING_OPERATOR_ID` | 400 | `X-Operator-ID` header absent |
+| `INVALID_OPERATOR_ID` | 400 | `X-Operator-ID` is not a valid UUID |
+| `SECRET_KEY_FROM_BROWSER` | 403 | `sk_*` key used in a request with an `Origin` header |
+| `DOMAIN_NOT_ALLOWED` | 403 | Request origin not in the key's `allowed_domains` list |
+| `IP_NOT_ALLOWED` | 403 | Request IP not in the key's IP whitelist |
+| `SCOPE_DENIED` | 403 | Restricted key lacks the scope for this operation |

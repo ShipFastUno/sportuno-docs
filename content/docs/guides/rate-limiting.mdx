@@ -1,0 +1,204 @@
+---
+title: Rate Limiting
+description: Four rate-limit tiers, response headers, and backoff strategies
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Overview
+
+The Sportuno API enforces rate limits per operator API key. Limits are applied on a rolling 1-minute window. Different endpoint groups have different limits reflecting their expected usage patterns.
+
+## Rate Limit Tiers
+
+| Tier | Endpoint Group | Limit | Window |
+|------|---------------|-------|--------|
+| Financial | Wallet callbacks (`/sportuno/players/*`) | 200 req/min | 1 minute |
+| Session | Widget session endpoints (`/v1/widget/sessions`) | 10,000 req/min | 1 minute |
+| Leaderboard | Leaderboard reads (`/v1/leaderboards`, `/v1/tournaments/*/leaderboard`) | 100 req/min | 1 minute |
+| Catalog | Tournament and market catalog (`/v1/tournaments`, `/v1/events`, `/v1/markets`, `/v1/odds`) | 500 req/min | 1 minute |
+
+<Callout type="info">
+Session tier limits are intentionally generous because session creation is called once per player visit. The leaderboard tier is lower because leaderboard data is also pushed via realtime — polling is unnecessary.
+</Callout>
+
+## Rate Limit Headers
+
+Every API response includes rate limit information in the response headers:
+
+```http
+X-RateLimit-Limit: 500
+X-RateLimit-Remaining: 487
+X-RateLimit-Reset: 1737740060
+```
+
+| Header | Type | Description |
+|--------|------|-------------|
+| `X-RateLimit-Limit` | integer | Maximum requests allowed in the current window |
+| `X-RateLimit-Remaining` | integer | Requests remaining in the current window |
+| `X-RateLimit-Reset` | integer | Unix timestamp (seconds) when the window resets |
+
+## 429 Response
+
+When a rate limit is exceeded, the API returns HTTP 429 with a `Retry-After` header:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 12
+X-RateLimit-Limit: 500
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 1737740060
+Content-Type: application/json
+```
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Too many requests. Retry after 12 seconds.",
+    "details": {
+      "limit": 500,
+      "window": "1m",
+      "retry_after": 12
+    }
+  }
+}
+```
+
+`Retry-After` is the number of seconds to wait before retrying. Always honour this value.
+
+## Backoff Implementation
+
+### Basic Retry-After Respect
+
+```typescript
+async function fetchWithRateLimit(url: string, options: RequestInit): Promise<Response> {
+  const response = await fetch(url, options);
+
+  if (response.status === 429) {
+    const retryAfter = parseInt(response.headers.get('Retry-After') ?? '60', 10);
+    await sleep(retryAfter * 1000);
+    return fetchWithRateLimit(url, options); // retry once
+  }
+
+  return response;
+}
+```
+
+### Exponential Backoff with Jitter
+
+For production use, combine `Retry-After` with exponential backoff and jitter to avoid thundering herd when many clients hit limits simultaneously:
+
+```typescript
+async function fetchWithBackoff(
+  url: string,
+  options: RequestInit,
+  maxAttempts = 4
+): Promise<Response> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await fetch(url, options);
+
+    if (response.status !== 429) {
+      return response; // success or non-retryable error
+    }
+
+    if (attempt === maxAttempts) {
+      return response; // give up after max attempts
+    }
+
+    // Respect Retry-After header if present
+    const retryAfterHeader = response.headers.get('Retry-After');
+    const retryAfterMs = retryAfterHeader
+      ? parseInt(retryAfterHeader, 10) * 1000
+      : Math.pow(2, attempt) * 1000; // exponential fallback
+
+    // Add jitter: ±10% of the wait time
+    const jitter = retryAfterMs * 0.1 * (Math.random() * 2 - 1);
+    const waitMs = Math.max(0, retryAfterMs + jitter);
+
+    await sleep(waitMs);
+  }
+
+  throw new Error('Unreachable');
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+```
+
+## Avoiding Rate Limits
+
+### Leaderboard Tier
+
+The leaderboard endpoint (100 req/min) is easily exhausted if you poll for updates. Use the [realtime Ably subscription](/docs/realtime/channels) instead:
+
+```typescript
+// Avoid this pattern:
+setInterval(async () => {
+  const lb = await fetchLeaderboard(tournamentId); // burns 60 req/min
+  renderLeaderboard(lb);
+}, 1000);
+
+// Use this instead:
+const channel = ablyClient.channels.get(`sportuno:leaderboard:${leaderboardId}`);
+channel.subscribe('leaderboard.updated', (msg) => {
+  renderLeaderboard(msg.data.entries); // pushed by Sportuno, no polling
+});
+```
+
+### Catalog Tier
+
+Cache catalog responses. Tournament and market data changes infrequently outside of live windows:
+
+```typescript
+const cache = new Map<string, { data: unknown; expiresAt: number }>();
+
+async function getCached<T>(key: string, fetcher: () => Promise<T>, ttlMs: number): Promise<T> {
+  const cached = cache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data as T;
+  }
+
+  const data = await fetcher();
+  cache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  return data;
+}
+
+// Cache tournament list for 60 seconds
+const tournaments = await getCached(
+  'tournaments',
+  () => sportunoClient.getTournaments(),
+  60_000
+);
+```
+
+### Financial Tier
+
+Wallet callbacks are triggered by player actions — you cannot control this rate. 200 req/min equates to ~3 concurrent players taking financial actions per second, which is sufficient for most operator scales. If you expect higher throughput, contact Sportuno to discuss custom limits.
+
+## Rate Limit Monitoring
+
+Read `X-RateLimit-Remaining` on responses to track consumption:
+
+```typescript
+function logRateLimitStatus(response: Response, endpoint: string): void {
+  const remaining = response.headers.get('X-RateLimit-Remaining');
+  const limit = response.headers.get('X-RateLimit-Limit');
+  const reset = response.headers.get('X-RateLimit-Reset');
+
+  if (remaining !== null && limit !== null) {
+    const usagePct = 1 - parseInt(remaining) / parseInt(limit!);
+    if (usagePct > 0.8) {
+      console.warn(`Rate limit warning: ${endpoint} is at ${Math.round(usagePct * 100)}% capacity`, {
+        remaining,
+        limit,
+        resetsAt: reset ? new Date(parseInt(reset) * 1000).toISOString() : null,
+      });
+    }
+  }
+}
+```
+
+Alert when `X-RateLimit-Remaining / X-RateLimit-Limit` drops below 20% to get ahead of throttling.

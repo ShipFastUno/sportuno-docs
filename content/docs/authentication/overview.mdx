@@ -1,0 +1,146 @@
+---
+title: Authentication Overview
+description: Sportuno uses a three-tier authentication model that separates browser-safe reads, player actions, and privileged server operations.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Three-Tier Model
+
+Sportuno's authentication is modelled after the Stripe API key design. Every request falls into one of three tiers, each with a different credential type and trust level.
+
+| Tier | Credential | Who holds it | Typical use |
+|------|-----------|--------------|-------------|
+| **Tier 1 — Public** | Publishable key (`pk_*`) | Browser / widget | Read catalog, odds, leaderboards |
+| **Tier 2 — Player** | Widget JWT | Browser / widget | Enroll, place bets, rebuy, add-on |
+| **Tier 3 — Server** | Secret key (`sk_*`) | Your backend only | Create widget sessions |
+
+The tiers are additive: Tier 3 operations require the most trust and are deliberately rejected when called from a browser. Tier 1 operations require the least trust and are safe to call with keys embedded in client-side code.
+
+## How the Tiers Work Together
+
+A typical session looks like this:
+
+```
+Your Backend                        Sportuno API
+     │                                   │
+     │  POST /v1/widget/sessions         │
+     │  Authorization: Bearer sk_live_…  │  ← Tier 3: secret key
+     │  X-Operator-ID: <your-uuid>       │
+     ├──────────────────────────────────►│
+     │◄──────────────────────────────────┤
+     │  { jwt, refresh_token }           │
+     │                                   │
+     │  (pass jwt to your frontend)      │
+     │                                   │
+ Browser                            Sportuno API
+     │                                   │
+     │  GET /v1/tournaments              │
+     │  X-API-Key: pk_live_…             │  ← Tier 1: publishable key
+     ├──────────────────────────────────►│
+     │◄──────────────────────────────────┤
+     │  [ tournament list ]              │
+     │                                   │
+     │  POST /v1/tournaments/{id}/bets   │
+     │  Authorization: Bearer <jwt>      │  ← Tier 2: widget JWT
+     ├──────────────────────────────────►│
+     │◄──────────────────────────────────┤
+     │  { bet_id, … }                    │
+```
+
+## Required Headers
+
+Every request to the Sportuno API must include your operator ID alongside the credential:
+
+```http
+X-Operator-ID: 550e8400-e29b-41d4-a716-446655440000
+```
+
+The credential itself can be passed in either of two ways:
+
+```http
+# Preferred
+X-API-Key: pk_live_abc123…
+
+# Alternative
+Authorization: Bearer pk_live_abc123…
+```
+
+<Callout type="warn" title="Always include X-Operator-ID">
+Every request — regardless of tier — requires the `X-Operator-ID` header. Requests missing this header receive a `400 MISSING_OPERATOR_ID` error. Requests where the operator ID does not match the key owner receive a `403 OPERATOR_MISMATCH` error.
+</Callout>
+
+## Environments
+
+Each key type comes in live and test variants. Test keys talk to the sandbox environment and have no real-money consequences.
+
+| Prefix | Environment |
+|--------|-------------|
+| `pk_live_*` | Production |
+| `pk_test_*` | Sandbox |
+| `sk_live_*` | Production |
+| `sk_test_*` | Sandbox |
+| `rk_live_*` | Production |
+| `rk_test_*` | Sandbox |
+
+<Callout type="info">
+The `pk_f2p_*` prefix is reserved for free-to-play widget configurations. These keys disable real-money flows and are always browser-safe.
+</Callout>
+
+## Tier 1: Public (Publishable Key)
+
+Tier 1 covers read-only catalog operations. These endpoints are safe to call directly from the browser because publishable keys carry no privileges that could affect funds or player data.
+
+**Endpoints (representative):**
+
+- `GET /v1/tournaments`
+- `GET /v1/tournaments/{id}`
+- `GET /v1/events/{id}/markets`
+- `GET /v1/markets/{id}/selections`
+- `GET /v1/odds`
+- `GET /v1/leaderboards`
+
+**Security enforcement:** The API validates that the request's `Origin` or `Referer` header matches the `allowed_domains` list registered for the key. Requests from unlisted domains receive `403 DOMAIN_NOT_ALLOWED`.
+
+## Tier 2: Player Actions (Widget JWT)
+
+Tier 2 covers all operations that act on behalf of a specific player. The Widget JWT — a short-lived RS256 token — is the credential. No API key is required at this tier.
+
+**Why no API key at Tier 2?**
+
+Operator and domain validation happens at session creation time (Tier 3) and the result is embedded in the JWT claims. Validating only the JWT on every player request avoids a database lookup on each bet, providing better latency. The auth service re-validates operator status at every JWT refresh, providing defence in depth.
+
+**Endpoints (representative):**
+
+- `POST /v1/tournaments/{id}/enroll`
+- `POST /v1/tournaments/{id}/bets`
+- `POST /v1/tournaments/{id}/rebuy`
+- `POST /v1/tournaments/{id}/addon`
+- `GET /v1/profile`
+
+## Tier 3: Server-to-Server (Secret Key)
+
+Tier 3 operations must be called from your backend. Secret keys are rejected when an `Origin` header is present in the request, which is a reliable signal that the call is coming from a browser.
+
+**Endpoints:**
+
+- `POST /v1/widget/sessions` — create a new session and receive a JWT
+- `POST /v1/widget/sessions/refresh` — refresh an expiring JWT
+
+<Callout type="error" title="Never expose secret keys in client-side code">
+Secret keys (`sk_*`) must never appear in JavaScript bundles, mobile app binaries, or any code that runs outside your server infrastructure. The API actively rejects secret key requests that carry a browser `Origin` header with `403 SECRET_KEY_FROM_BROWSER`.
+</Callout>
+
+## Restricted Keys
+
+Restricted keys (`rk_*`) are a narrower alternative to secret keys. Each restricted key is issued with a specific set of scopes, limiting what operations it can perform. Use them for third-party integrations or internal services that should not have full operator access.
+
+Example scopes: `tournaments:read`, `events:*`, `leaderboards:read`.
+
+See [API Keys](/docs/authentication/api-keys) for details on restricted key scopes.
+
+## Next Steps
+
+- [API Keys](/docs/authentication/api-keys) — key formats, rotation, and management
+- [Widget JWT](/docs/authentication/widget-jwt) — JWT claims, lifecycle, and refresh
+- [Security](/docs/authentication/security) — domain restrictions, IP whitelisting, key rotation

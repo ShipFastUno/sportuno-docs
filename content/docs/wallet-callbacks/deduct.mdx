@@ -1,0 +1,215 @@
+---
+title: Deduct Endpoint
+description: POST /sportuno/players/:id/deduct — debit a player's wallet for tournament entry, rebuy, or add-on
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Overview
+
+Sportuno calls this endpoint whenever it needs to debit funds from a player's wallet. This happens for three reasons:
+
+| Reason | Description |
+|--------|-------------|
+| `TOURNAMENT_ENTRY` | Player enrolls in a tournament (pays the entry fee) |
+| `REBUY` | Player purchases a rebuy during a tournament |
+| `ADDON` | Player purchases an add-on when the add-on window opens |
+
+## Endpoint
+
+```
+POST /sportuno/players/:id/deduct
+```
+
+The `:id` parameter is the player's external ID — the same `player_external_id` your backend provided when creating the widget session.
+
+## Headers
+
+All wallet callbacks include HMAC authentication headers. Verify them before processing. See [HMAC Verification](/docs/wallet-callbacks/hmac-verification).
+
+```http
+Authorization: Bearer {api_key}
+X-Sportuno-Timestamp: 1737740000000
+X-Sportuno-Signature: a3f9e2c1...
+X-Sportuno-Operator-Id: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: application/json
+```
+
+## Request Body
+
+```json
+{
+  "transaction_id": "sp_txn_01JKQMVS3BYWT7FGCE4N",
+  "amount": 100.00,
+  "reason": "TOURNAMENT_ENTRY",
+  "reference": {
+    "tournament_id": "tour_01JKQMVS3BYWT7FGCE4N",
+    "tournament_name": "Sunday Slam"
+  },
+  "idempotency_key": "ik_01JKQMVS3BYWT7FGCE4N"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `transaction_id` | string | Sportuno's transaction ID — store this for reconciliation |
+| `amount` | number | Amount to deduct. Always a positive number, denominated in the player's currency |
+| `reason` | string | One of `TOURNAMENT_ENTRY`, `REBUY`, `ADDON` |
+| `reference.tournament_id` | string | UUID of the tournament |
+| `reference.tournament_name` | string | Display name of the tournament |
+| `idempotency_key` | string | Unique key for this deduct operation — see [Idempotency](/docs/wallet-callbacks/idempotency) |
+
+<Callout type="info">
+`amount` is always positive. For a 100-unit entry fee, the value will be `100`, not `-100`.
+</Callout>
+
+## Success Response
+
+Return HTTP 200 with:
+
+```json
+{
+  "success": true,
+  "operator_transaction_id": "txn_abc_1234567890",
+  "new_balance": 850.00
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `true` | Must be the literal boolean `true` |
+| `operator_transaction_id` | string | Your transaction ID — Sportuno records this for reconciliation |
+| `new_balance` | number | Player's balance after the deduction |
+
+## Error Responses
+
+### Insufficient Funds
+
+Return HTTP 400 when the player does not have enough balance. The widget will display an error to the player.
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "INSUFFICIENT_FUNDS",
+    "message": "Player balance is 50.00, required 100.00"
+  }
+}
+```
+
+### Wallet Locked
+
+Return HTTP 423 when the player's account is suspended or self-excluded.
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "WALLET_LOCKED",
+    "message": "Player account is suspended"
+  }
+}
+```
+
+### Player Not Found
+
+Return HTTP 404 if the player ID is not recognized.
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "PLAYER_NOT_FOUND",
+    "message": "No player found with external ID player_123"
+  }
+}
+```
+
+<Callout type="warn">
+Do not return HTTP 404 for legitimate players who haven't been seen before. Sportuno may send deduct requests for players before a `balance` check in some edge cases. Either auto-provision the player or return `INSUFFICIENT_FUNDS` if their balance would be zero.
+</Callout>
+
+## Implementation Guide
+
+### Recommended Steps
+
+1. **Verify HMAC** — reject the request immediately if verification fails
+2. **Check idempotency** — if this `idempotency_key` was already processed, return the cached response
+3. **Find the player** — look up the player by external ID; auto-provision if needed
+4. **Check balance** — verify the player has sufficient funds
+5. **Debit atomically** — deduct the amount in a database transaction
+6. **Return the response** — include your internal transaction ID and the new balance
+
+### Example (TypeScript)
+
+```typescript
+app.post('/sportuno/players/:id/deduct', hmacMiddleware, async (req, res) => {
+  const { id: playerId } = req.params;
+  const { transaction_id, amount, reason, reference, idempotency_key } = req.body;
+
+  // Check idempotency cache first
+  const cached = await idempotencyStore.get(idempotency_key);
+  if (cached) {
+    return res.json(cached);
+  }
+
+  // Find or provision player
+  const player = await db.players.findByExternalId(playerId);
+  if (!player) {
+    return res.status(404).json({
+      success: false,
+      error: { code: 'PLAYER_NOT_FOUND', message: `Player ${playerId} not found` },
+    });
+  }
+
+  // Check and debit in one transaction
+  try {
+    const { newBalance, txnId } = await db.transaction(async (trx) => {
+      const wallet = await trx.wallets.lockForUpdate(player.id);
+
+      if (wallet.balance < amount) {
+        throw new InsufficientFundsError(wallet.balance, amount);
+      }
+
+      await trx.wallets.decrement(player.id, amount);
+      const txn = await trx.transactions.create({
+        playerId: player.id,
+        amount: -amount,
+        reason,
+        sportunoTransactionId: transaction_id,
+        reference,
+      });
+
+      return { newBalance: wallet.balance - amount, txnId: txn.id };
+    });
+
+    const response = {
+      success: true,
+      operator_transaction_id: txnId,
+      new_balance: newBalance,
+    };
+
+    // Store in idempotency cache for 24h
+    await idempotencyStore.set(idempotency_key, response, 86400);
+
+    return res.json(response);
+  } catch (err) {
+    if (err instanceof InsufficientFundsError) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INSUFFICIENT_FUNDS', message: err.message },
+      });
+    }
+    throw err;
+  }
+});
+```
+
+## Reconciliation
+
+Every deduct response you return includes an `operator_transaction_id`. Sportuno stores this alongside its own `transaction_id`. You can use these paired IDs to reconcile your ledger against Sportuno's settlement reports.
+
+Store the following in your wallet transaction record:
+- `sportuno_transaction_id` — the `transaction_id` from the request body
+- `idempotency_key` — for replay protection
+- `reference.tournament_id` — to tie the debit to a specific tournament

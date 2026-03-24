@@ -1,0 +1,237 @@
+---
+title: PostMessage API
+description: Reference for all 6 PostMessage types exchanged between the Sportuno iframe and the parent page
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The Sportuno iframe and the parent page communicate exclusively via the browser's `window.postMessage` API. The JS SDK handles all of this automatically — you only need to understand the message types if you are building a custom integration or debugging.
+
+## Message overview
+
+| Message type | Direction | Description |
+|--------------|-----------|-------------|
+| `IFRAME_READY` | iframe → parent | Iframe has finished loading and is ready to receive tokens |
+| `SESSION_SET_TOKEN` | parent → iframe | Deliver session tokens to the iframe |
+| `SESSION_LOGOUT` | parent → iframe | Clear the authenticated session in the iframe |
+| `SESSION_EXPIRED` | iframe → parent | The session token has expired |
+| `UPDATE_LANGUAGE` | parent → iframe | Switch the UI language at runtime |
+| `REQUEST_SHARE` | iframe → parent | Player wants to share a leaderboard link |
+
+---
+
+## `IFRAME_READY`
+
+**Direction:** iframe → parent
+
+Sent by the embed when its initial hydration is complete and it is ready to accept a session token. The SDK listens for this message and automatically calls `sendSession()` internally, which sends `SESSION_SET_TOKEN` to the iframe.
+
+```javascript
+// Shape of the message data
+{
+  type: 'IFRAME_READY'
+}
+```
+
+Your `onIframeReady` callback fires immediately after the SDK processes this message.
+
+**Usage:** Use `onIframeReady` to dismiss loading spinners or reveal the container:
+
+```javascript
+window.Sportuno.init({
+  // ...
+  onIframeReady: function () {
+    document.getElementById('loading-spinner').style.display = 'none';
+  },
+});
+```
+
+---
+
+## `SESSION_SET_TOKEN`
+
+**Direction:** parent → iframe
+
+Delivers player session tokens to the iframe. Sent automatically by the SDK in two situations:
+
+1. After receiving `IFRAME_READY`
+2. When `window.Sportuno.updateSession()` is called
+
+```javascript
+// Shape of the message data
+{
+  type: 'SESSION_SET_TOKEN',
+  playerSessionId: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
+  gameSessionId: 'a1b2c3d4-...',
+  operatorId: 'your-operator-id'
+}
+```
+
+<Callout type="info">
+  If either `playerSessionId` or `gameSessionId` is an empty string, the SDK calls `closeSession()` instead of sending this message.
+</Callout>
+
+**You do not send this message directly.** Call `window.Sportuno.updateSession()` instead:
+
+```javascript
+window.Sportuno.updateSession({
+  playerSessionId: 'new-token',
+  gameSessionId: 'new-game-session-id',
+});
+```
+
+---
+
+## `SESSION_LOGOUT`
+
+**Direction:** parent → iframe
+
+Instructs the iframe to clear the authenticated session and return to an anonymous/unauthenticated state.
+
+```javascript
+// Shape of the message data
+{
+  type: 'SESSION_LOGOUT'
+}
+```
+
+**You do not send this message directly.** Call `window.Sportuno.closeSession()` instead:
+
+```javascript
+window.Sportuno.closeSession();
+```
+
+Call this when the player logs out of your platform.
+
+---
+
+## `SESSION_EXPIRED`
+
+**Direction:** iframe → parent
+
+Sent by the embed when the player's session token has expired and the iframe can no longer make authenticated requests.
+
+```javascript
+// Shape of the message data
+{
+  type: 'SESSION_EXPIRED'
+}
+```
+
+The SDK forwards this to your `onSessionExpired` callback. The recommended response is to attempt a session refresh and push a new token:
+
+```javascript
+window.Sportuno.init({
+  // ...
+  onSessionExpired: async function () {
+    try {
+      // Refresh via your BFF
+      const data = await fetch('/api/refresh-widget-session', {
+        method: 'POST',
+      }).then(r => r.json());
+
+      window.Sportuno.updateSession({
+        playerSessionId: data.sessionToken,
+        gameSessionId: data.gameSessionId,
+      });
+    } catch {
+      // Refresh failed — close the session and prompt the player to log in again
+      window.Sportuno.closeSession();
+      showLoginPrompt();
+    }
+  },
+});
+```
+
+<Callout type="warn" title="Avoid SESSION_EXPIRED in production">
+  `SESSION_EXPIRED` indicates the token was not refreshed before expiry. Implement the proactive refresh pattern described in [Session Management](/docs/widget-integration/session-management) to prevent this.
+</Callout>
+
+---
+
+## `UPDATE_LANGUAGE`
+
+**Direction:** parent → iframe
+
+Switches the iframe UI language at runtime without remounting the iframe.
+
+```javascript
+// Shape of the message data
+{
+  type: 'UPDATE_LANGUAGE',
+  language: 'pt'
+}
+```
+
+**You do not send this message directly.** Call `window.Sportuno.setLanguage()` instead:
+
+```javascript
+window.Sportuno.setLanguage('pt');
+```
+
+Supported language codes: `'en'` (English), `'pt'` (Portuguese).
+
+---
+
+## `REQUEST_SHARE`
+
+**Direction:** iframe → parent
+
+Sent when a player clicks a share button on the leaderboard. The iframe requests the parent to trigger the native Web Share API, which requires a user gesture in the parent frame context.
+
+```javascript
+// Shape of the message data
+{
+  type: 'REQUEST_SHARE',
+  title: 'Check out my score!',
+  text: 'I just ranked #3 on the Sportuno leaderboard.',
+  url: 'https://yourplatform.com/?join=leaderboard&subLeaderboardId=...'
+}
+```
+
+The SDK handles this automatically using `navigator.share()` if the browser supports it. If `navigator.share` is not available or the share fails, the SDK logs a warning and takes no further action.
+
+**You do not need to handle this message manually.** It is documented here for completeness.
+
+---
+
+## Origin validation
+
+The SDK only processes messages from the iframe origin registered for your `clientId`. Messages from any other origin are silently ignored:
+
+```javascript
+// SDK internal validation
+if (event.origin !== clientConfig.iframeOrigin) {
+  console.warn(`[Sportuno] Ignored message from untrusted origin: ${event.origin}`);
+  return;
+}
+```
+
+This prevents other iframes or third-party scripts on your page from injecting fake session events.
+
+## Custom PostMessage listener
+
+If you need to listen to widget events outside of the SDK callbacks (for example, for analytics), you can add your own listener alongside the SDK:
+
+```javascript
+window.addEventListener('message', (event) => {
+  // Always validate the origin
+  if (event.origin !== 'https://embed.sportuno.com') return;
+
+  const { data } = event;
+  if (!data || typeof data !== 'object') return;
+
+  switch (data.type) {
+    case 'IFRAME_READY':
+      analytics.track('widget_iframe_ready');
+      break;
+    case 'SESSION_EXPIRED':
+      analytics.track('widget_session_expired');
+      break;
+  }
+});
+```
+
+<Callout type="warn">
+  Always validate `event.origin` in custom listeners. Never trust `event.data` from an unknown origin.
+</Callout>

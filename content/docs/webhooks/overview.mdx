@@ -1,0 +1,166 @@
+---
+title: Webhooks Overview
+description: Receive tournament lifecycle events from Sportuno via HTTP webhooks
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## What Are Webhooks?
+
+Webhooks are event notifications that Sportuno sends to your server when significant things happen inside the platform. Unlike wallet callbacks (which are synchronous and blocking), webhooks are informational: Sportuno delivers them and expects a quick acknowledgement, then processes continues regardless of your response.
+
+## When to Use Webhooks vs Wallet Callbacks
+
+| Signal | Mechanism | Your Response Required |
+|--------|-----------|----------------------|
+| Player joined tournament | Webhook (`tournament.joined`) | Acknowledge (optional processing) |
+| Tournament settled | Webhook (`tournament.settled`) | Acknowledge (processing async) |
+| Tournament cancelled | Webhook (`tournament.cancelled`) | Acknowledge (processing async) |
+| Entry fee deduct | Wallet callback (`/deduct`) | Approve or reject (synchronous) |
+| Prize credit | Wallet callback (`/credit`) | Confirm received (synchronous) |
+
+<Callout type="info">
+Wallet callbacks block the player action — if your server is slow or unavailable, the player waits or sees an error. Webhooks are asynchronous — a slow response delays your processing but does not affect the player experience.
+</Callout>
+
+## Endpoint
+
+Sportuno delivers all events to a single endpoint on your server:
+
+```
+POST /sportuno/webhooks
+```
+
+This URL is relative to your configured callback base URL, the same base URL used for wallet callbacks.
+
+## Security
+
+Webhooks use the same HMAC signature scheme as wallet callbacks. Every webhook request includes:
+
+```http
+Authorization: Bearer {api_key}
+X-Sportuno-Timestamp: 1737740000000
+X-Sportuno-Signature: a3f9e2c1...
+X-Sportuno-Operator-Id: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: application/json
+```
+
+Verify these headers before processing any event. See [HMAC Verification](/docs/wallet-callbacks/hmac-verification) for the algorithm.
+
+## Request Body
+
+```json
+{
+  "event_type": "tournament.settled",
+  "event_id": "evt_01JKQMVS3BYWT7FGCE4N",
+  "data": {
+    "tournament_id": "tour_01JKQMVS3BYWT7FGCE4N",
+    "player_id": "player_123",
+    "tournament_name": "Sunday Slam",
+    "prize_amount": 500.00,
+    "final_position": 1
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event_type` | string | The event name (see [Events](/docs/webhooks/events)) |
+| `event_id` | string | Unique ID for this event — use for idempotency |
+| `data` | object | Event-specific payload — shape varies by `event_type` |
+
+## Expected Response
+
+Acknowledge the webhook immediately:
+
+```json
+{
+  "success": true,
+  "received": true,
+  "event_id": "evt_01JKQMVS3BYWT7FGCE4N"
+}
+```
+
+Return HTTP 200. Any other status code causes Sportuno to retry.
+
+<Callout type="warn">
+Respond within **5 seconds**. If your processing takes longer (e.g., querying external systems, sending emails), store the event and process it asynchronously. The webhook acknowledgement should be fast.
+</Callout>
+
+## Idempotency
+
+Sportuno may deliver the same event more than once (network failures, retries). Your handler must be idempotent. Use `event_id` as the idempotency key.
+
+```typescript
+// Check if already processed
+const existing = await db.webhookEvents.findByEventId(event_id);
+if (existing) {
+  return { success: true, received: true, event_id, duplicate: true };
+}
+
+// Store first, then acknowledge
+await db.webhookEvents.create({ event_id, event_type, data, processed: false });
+return { success: true, received: true, event_id };
+```
+
+## Recommended Processing Pattern
+
+### 1. Store and Acknowledge
+
+```typescript
+app.post('/sportuno/webhooks', hmacMiddleware, async (req, res) => {
+  const { event_type, event_id, data } = req.body;
+
+  // Idempotency check
+  if (await eventStore.exists(event_id)) {
+    return res.json({ success: true, received: true, event_id, duplicate: true });
+  }
+
+  // Store the raw event
+  await eventStore.create({ event_id, event_type, data, processed: false });
+
+  // Acknowledge immediately
+  res.json({ success: true, received: true, event_id });
+
+  // Process asynchronously (after response sent)
+  processEvent(event_id, event_type, data).catch((err) => {
+    logger.error('Failed to process webhook', { event_id, error: err });
+  });
+});
+```
+
+### 2. Process Asynchronously
+
+```typescript
+async function processEvent(eventId: string, eventType: string, data: unknown) {
+  switch (eventType) {
+    case 'tournament.joined':
+      await handleTournamentJoined(data);
+      break;
+    case 'tournament.settled':
+      await handleTournamentSettled(data);
+      break;
+    case 'tournament.cancelled':
+      await handleTournamentCancelled(data);
+      break;
+  }
+
+  await eventStore.markProcessed(eventId);
+}
+```
+
+## Retry Policy
+
+| Attempt | Delay |
+|---------|-------|
+| 1 (initial) | Immediate |
+| 2 | 30 seconds |
+| 3 | 5 minutes |
+| 4 | 30 minutes |
+| 5 | 2 hours |
+
+After 5 failed attempts, the event is marked as undelivered. Contact support if you believe events are being dropped.
+
+## Next Steps
+
+- [Events Reference](/docs/webhooks/events) — Full payload schemas for all event types

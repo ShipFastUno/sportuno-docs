@@ -1,0 +1,196 @@
+---
+title: Testing & Sandbox
+description: UAT sandbox environment, test credentials, and simulating wallet callbacks
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Sandbox Environment
+
+Sportuno provides a fully-featured UAT (User Acceptance Testing) sandbox that mirrors production. All features are available in UAT, with no real money involved.
+
+### Endpoints
+
+| Service | UAT | Production |
+|---------|-----|-----------|
+| Auth API | `https://auth-uat.sportuno.win` | `https://auth.sportuno.win` |
+| Edge API | `https://api-uat.sportuno.win` | `https://api.sportuno.win` |
+| Widget | `https://widget-uat.sportuno.win` | `https://widget.sportuno.win` |
+| Backoffice | `https://backoffice-uat.sportuno.win` | `https://backoffice.sportuno.win` |
+| OpenAPI Spec | `https://api-uat.sportuno.win/v1/.well-known/openapi.json` | `https://api.sportuno.win/v1/.well-known/openapi.json` |
+
+### Test Credentials
+
+Test API keys use the `_test_` prefix:
+
+| Key Type | Format | Purpose |
+|----------|--------|---------|
+| Secret key | `sk_test_...` | Create widget sessions from your backend |
+| Public key | `pk_test_...` | Widget SDK initialization |
+
+<Callout type="info">
+Test credentials are provided during onboarding. If you need to reset them or request additional test keys, contact your Sportuno integration manager.
+</Callout>
+
+## Differences from Production
+
+| Feature | UAT | Production |
+|---------|-----|-----------|
+| Real money | No | Yes |
+| Wallet callbacks | Real HTTP calls to your configured URL | Real HTTP calls |
+| Sports data feed | Simulated / delayed | Live |
+| Tournament schedule | On-demand test tournaments | Scheduled |
+| HMAC verification | Same algorithm | Same algorithm |
+| Ably realtime | Active | Active |
+| API rate limits | Relaxed (10x higher) | Standard (see [Rate Limiting](/docs/guides/rate-limiting)) |
+
+## Setting Up Your Wallet Callback Handler for Testing
+
+### Using ngrok or Cloudflare Tunnel
+
+During local development, expose your local server so Sportuno UAT can call your wallet callbacks:
+
+```bash
+# ngrok
+ngrok http 3000
+# Output: https://abc123.ngrok.io → http://localhost:3000
+
+# Cloudflare Tunnel
+cloudflared tunnel --url http://localhost:3000
+```
+
+Register the public URL as your callback base URL in the UAT backoffice:
+`https://backoffice-uat.sportuno.win` → Operator Settings → Callback URL
+
+### Test Wallet Flow
+
+1. Create a widget session with a test player ID:
+
+```bash
+curl -X POST https://auth-uat.sportuno.win/api/v1/widget/sessions \
+  -H "Authorization: Bearer sk_test_your_key" \
+  -H "X-Operator-ID: your-operator-uuid" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "player_external_id": "test_player_001",
+    "player_display_name": "Test Player",
+    "player_currency": "USD",
+    "allowed_origins": ["http://localhost:3000"]
+  }'
+```
+
+2. Load the widget with the returned `session_token`
+3. Enroll in a test tournament — Sportuno will call your `/sportuno/players/test_player_001/deduct` endpoint
+4. Verify your handler returns a valid success response
+5. When the tournament settles, verify the credit callback arrives and is processed correctly
+
+## Simulating Callbacks
+
+You can simulate Sportuno wallet callbacks directly without going through the widget, useful for unit testing your callback handlers.
+
+### Generating a Valid HMAC Signature
+
+```typescript
+import { createHmac } from 'crypto';
+
+function generateSportunoHeaders(
+  body: object,
+  apiKey: string,
+  apiSecret: string,
+  operatorId: string
+) {
+  const timestamp = Date.now().toString();
+  const rawBody = JSON.stringify(body);
+  const payload = `${timestamp}.${rawBody}`;
+
+  const signature = createHmac('sha256', apiSecret)
+    .update(payload, 'utf8')
+    .digest('hex');
+
+  return {
+    'Authorization': `Bearer ${apiKey}`,
+    'X-Sportuno-Timestamp': timestamp,
+    'X-Sportuno-Signature': signature,
+    'X-Sportuno-Operator-Id': operatorId,
+    'Content-Type': 'application/json',
+  };
+}
+
+// Use in tests
+const body = {
+  transaction_id: 'sp_txn_test_001',
+  amount: 100,
+  reason: 'TOURNAMENT_ENTRY',
+  reference: {
+    tournament_id: 'tour_test_001',
+    tournament_name: 'Test Tournament',
+  },
+  idempotency_key: 'ik_test_001',
+};
+
+const headers = generateSportunoHeaders(
+  body,
+  process.env.SPORTUNO_API_KEY!,
+  process.env.SPORTUNO_API_SECRET!,
+  process.env.OPERATOR_ID!,
+);
+
+const response = await fetch('http://localhost:3000/sportuno/players/test_player_001/deduct', {
+  method: 'POST',
+  headers,
+  body: JSON.stringify(body),
+});
+```
+
+### Test Cases to Cover
+
+| Scenario | Expected Behaviour |
+|----------|-------------------|
+| Valid deduct request | 200 with `success: true` and decremented balance |
+| Insufficient funds | 400 with `INSUFFICIENT_FUNDS` error code |
+| Missing HMAC headers | 401 |
+| Invalid HMAC signature | 401 |
+| Expired timestamp (>5min) | 401 |
+| Duplicate idempotency key | 200 with cached response (no double-debit) |
+| Zero-amount credit | 200 with `success: true` and unchanged balance |
+| Unknown player ID | 404 with `PLAYER_NOT_FOUND` |
+
+## Test Tournaments
+
+The UAT backoffice provides a set of on-demand test tournaments you can start at any time. Navigate to:
+
+`https://backoffice-uat.sportuno.win` → Tournaments → Create Test Tournament
+
+You can configure:
+- Entry fee amount
+- Number of rebuys allowed
+- Add-on availability
+- Tournament duration (can be as short as 5 minutes for rapid testing)
+- Prize structure
+
+## Webhook Testing
+
+Use the "Send Test Webhook" feature in the backoffice to fire test webhook events to your registered callback URL:
+
+`https://backoffice-uat.sportuno.win` → Operator Settings → Webhooks → Send Test Event
+
+Select the event type (`tournament.joined`, `tournament.settled`, `tournament.cancelled`) and a test player — Sportuno will construct and deliver a signed webhook payload to your endpoint.
+
+## Checklist Before Going Live
+
+Before switching from test to live credentials, verify the following:
+
+- [ ] All three wallet callback endpoints respond correctly (`/deduct`, `/credit`, `/balance`)
+- [ ] HMAC verification implemented and tested with invalid signatures
+- [ ] Timestamp replay protection verified (requests older than 5 minutes rejected)
+- [ ] Idempotency keys prevent double-charges on retried requests
+- [ ] Zero-amount credit requests accepted successfully
+- [ ] Webhook handler acknowledges events quickly (under 5 seconds)
+- [ ] Webhook idempotency implemented (duplicate `event_id` safely ignored)
+- [ ] Error responses use the correct format (`{ success: false, error: { code, message } }`)
+- [ ] Your callback URL is reachable from the public internet (not localhost)
+- [ ] Environment variables differ between test and live (`sk_test_*` vs `sk_live_*`)
+
+<Callout type="warn">
+Never use live API keys (`sk_live_*`, `pk_live_*`) in your test environment or against UAT endpoints. Live keys trigger real financial operations.
+</Callout>

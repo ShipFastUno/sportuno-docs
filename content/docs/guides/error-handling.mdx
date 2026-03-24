@@ -1,0 +1,234 @@
+---
+title: Error Handling
+description: Standard error response envelope and complete error code reference
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Response Envelope
+
+Every Sportuno API response follows a consistent envelope format.
+
+### Success
+
+```json
+{
+  "success": true,
+  "data": {
+    "session_token": "eyJhbGciOiJSUzI1NiIs...",
+    "expires_at": "2026-03-24T10:30:00Z"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `true` | Literal boolean |
+| `data` | object | Response payload — shape varies by endpoint |
+
+### Error
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_API_KEY",
+    "message": "The provided API key is not valid",
+    "details": {
+      "field": "authorization"
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `false` | Literal boolean |
+| `error.code` | string | Machine-readable error code — use this for programmatic handling |
+| `error.message` | string | Human-readable description — suitable for logging, not for display to players |
+| `error.details` | object | Optional additional context (field names, limits, etc.) |
+
+<Callout type="info">
+Always branch on `error.code`, not `error.message`. Messages may change between API versions; codes are stable.
+</Callout>
+
+## HTTP Status Codes
+
+| Status | Meaning |
+|--------|---------|
+| 200 | Success |
+| 400 | Bad request — invalid input, missing fields, business rule violation |
+| 401 | Unauthenticated — missing or invalid credentials |
+| 403 | Forbidden — valid credentials but insufficient permissions |
+| 404 | Not found — resource does not exist |
+| 409 | Conflict — duplicate operation (e.g., already enrolled) |
+| 422 | Unprocessable entity — input is syntactically valid but semantically wrong |
+| 423 | Locked — resource is locked (e.g., wallet frozen) |
+| 429 | Rate limited — see [Rate Limiting](/docs/guides/rate-limiting) |
+| 500 | Internal server error — unexpected failure |
+| 503 | Service unavailable — temporary outage or maintenance |
+
+## Error Code Reference
+
+### Authentication Errors (401)
+
+| Code | Description | Resolution |
+|------|-------------|------------|
+| `INVALID_API_KEY` | API key not found or revoked | Check your key in the operator dashboard |
+| `EXPIRED_TOKEN` | Widget JWT or API token has expired | Create a new session or refresh the token |
+| `MISSING_AUTH` | No `Authorization` header provided | Add the `Authorization: Bearer {key}` header |
+| `INVALID_TOKEN_FORMAT` | Token is malformed (not a valid JWT) | Ensure you are passing the raw token, not URL-encoded |
+| `SIGNATURE_INVALID` | HMAC signature verification failed (inbound callbacks) | Check your HMAC verification implementation |
+| `TIMESTAMP_EXPIRED` | Request timestamp is outside the ±5 minute window | Sync your server clock with NTP |
+
+### Authorization Errors (403)
+
+| Code | Description | Resolution |
+|------|-------------|------------|
+| `OPERATOR_MISMATCH` | `X-Operator-ID` header does not match the API key | Ensure operator ID and API key belong to the same operator |
+| `OPERATOR_DISABLED` | Operator account has been deactivated | Contact Sportuno support |
+| `INSUFFICIENT_PERMISSIONS` | API key tier does not allow this operation | Use a higher-tier key (e.g., `sk_*` instead of `pk_*`) |
+| `ORIGIN_NOT_ALLOWED` | Request origin not in the `allowed_origins` list | Add your domain to `allowed_origins` when creating the session |
+| `SERVER_TO_SERVER_ONLY` | Endpoint rejects browser requests (Origin header present) | Call this endpoint from your backend, not from the browser |
+
+### Session Errors (400 / 401)
+
+| Code | Description | Resolution |
+|------|-------------|------------|
+| `MISSING_PLAYER_ID` | `player_external_id` not provided | Include `player_external_id` in the session creation request |
+| `MISSING_DISPLAY_NAME` | `player_display_name` not provided | Include `player_display_name` in the session creation request |
+| `MISSING_CURRENCY` | `player_currency` not provided | Include a 3-char ISO 4217 currency code |
+| `INVALID_CURRENCY` | Currency code not supported | Use a supported currency (e.g., `USD`, `EUR`, `GBP`) |
+| `SESSION_NOT_FOUND` | Session ID does not exist | Sessions expire; create a new one |
+| `SESSION_EXPIRED` | Session token is past its expiry | Refresh the session token |
+
+### Tournament Errors (400 / 409 / 422)
+
+| Code | Description | Resolution |
+|------|-------------|------------|
+| `TOURNAMENT_NOT_FOUND` | Tournament does not exist | Verify the tournament ID |
+| `TOURNAMENT_NOT_OPEN` | Tournament is not accepting enrollments | Check tournament status before enrolling |
+| `TOURNAMENT_FULL` | Maximum participants reached | No action — tournament is at capacity |
+| `ALREADY_ENROLLED` | Player is already enrolled in this tournament | Check enrollment status before attempting to enroll |
+| `ENROLLMENT_WINDOW_CLOSED` | Registration deadline has passed | No action — too late to enroll |
+| `REBUY_NOT_AVAILABLE` | Rebuy window is not open | Check rebuy status before attempting |
+| `REBUY_LIMIT_REACHED` | Player has used all available rebuys | No action — maximum rebuys consumed |
+| `ADDON_NOT_AVAILABLE` | Add-on window is not open | Check add-on status before attempting |
+
+### Wallet / Financial Errors (400 / 423)
+
+| Code | Description | Resolution |
+|------|-------------|------------|
+| `INSUFFICIENT_FUNDS` | Player balance too low | Player must top up; inform them via the widget |
+| `WALLET_LOCKED` | Player wallet is frozen or self-excluded | Contact your compliance team |
+| `TRANSACTION_NOT_FOUND` | Transaction ID not found | Verify the transaction ID |
+| `DUPLICATE_TRANSACTION` | Transaction already processed (non-idempotent conflict) | Use idempotency keys correctly |
+
+### Validation Errors (400)
+
+| Code | Description |
+|------|-------------|
+| `VALIDATION_ERROR` | One or more request fields failed validation — see `error.details` |
+| `MISSING_FIELD` | A required field was not provided — `error.details.field` names it |
+| `INVALID_FIELD` | A field value is invalid — `error.details.field` and `error.details.reason` describe it |
+| `INVALID_UUID` | A UUID field contains a non-UUID value |
+| `INVALID_OPERATOR_ID` | `X-Operator-ID` is not a valid UUID |
+
+### Rate Limit Errors (429)
+
+See [Rate Limiting](/docs/guides/rate-limiting) for full details.
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Too many requests. Retry after 12 seconds.",
+    "details": {
+      "limit": 200,
+      "window": "1m",
+      "retry_after": 12
+    }
+  }
+}
+```
+
+## Handling Errors in Code
+
+### TypeScript pattern
+
+```typescript
+interface SportunoError {
+  success: false;
+  error: {
+    code: string;
+    message: string;
+    details?: Record<string, unknown>;
+  };
+}
+
+interface SportunoSuccess<T> {
+  success: true;
+  data: T;
+}
+
+type SportunoResponse<T> = SportunoSuccess<T> | SportunoError;
+
+async function createSession(payload: SessionPayload): Promise<SessionData> {
+  const response = await fetch('/api/v1/widget/sessions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${API_KEY}`,
+      'X-Operator-ID': OPERATOR_ID,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const body: SportunoResponse<SessionData> = await response.json();
+
+  if (!body.success) {
+    switch (body.error.code) {
+      case 'OPERATOR_DISABLED':
+        throw new Error('Operator account is inactive. Contact support.');
+      case 'INVALID_API_KEY':
+        throw new Error('Invalid API key. Check your configuration.');
+      default:
+        throw new Error(`Sportuno error: ${body.error.code} — ${body.error.message}`);
+    }
+  }
+
+  return body.data;
+}
+```
+
+## Server Error Behaviour
+
+5xx errors from Sportuno are transient. Implement exponential backoff for server-side calls:
+
+```typescript
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxAttempts = 3
+): Promise<T> {
+  let lastError: Error;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err as Error;
+
+      // Only retry on 5xx
+      if (err instanceof HttpError && err.status < 500) throw err;
+
+      if (attempt < maxAttempts) {
+        const delay = Math.pow(2, attempt - 1) * 100; // 100ms, 200ms, 400ms
+        await sleep(delay);
+      }
+    }
+  }
+
+  throw lastError!;
+}
+```

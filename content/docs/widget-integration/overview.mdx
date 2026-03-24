@@ -1,0 +1,107 @@
+---
+title: Widget Integration Overview
+description: Architecture overview of the Sportuno embeddable tournament widget
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+The Sportuno widget is an embeddable iframe that delivers a full tournament experience — browsing, enrollment, betting, leaderboards, and rebuy/add-on — inside your platform without requiring you to build any game UI yourself.
+
+## Architecture
+
+The integration has three layers that interact at runtime:
+
+```
+Your Backend                    Sportuno API
+    │                               │
+    │  POST /v1/widget/sessions     │
+    │  Authorization: Bearer sk_*   │
+    │──────────────────────────────▶│
+    │                               │
+    │◀── { session_token,           │
+    │       widget_url,             │
+    │       expires_at,             │
+    │       refresh_before }        │
+    │                               │
+Your Frontend                   Embed iframe (widget_url)
+    │                               │
+    │  window.Sportuno.init({       │
+    │    playerSessionId,           │
+    │    gameSessionId              │
+    │  })                           │
+    │                               │
+    │◀──── PostMessage events ─────▶│
+    │  IFRAME_READY                 │
+    │  SESSION_EXPIRED              │
+    │  REQUEST_SHARE                │
+```
+
+### Components
+
+| Component | Role |
+|-----------|------|
+| **Your backend** | Calls Sportuno with a secret key (`sk_*`) to create session tokens. Never runs in the browser. |
+| **Your frontend** | Loads the JS SDK, calls `window.Sportuno.init()`, manages token refresh. |
+| **Sportuno JS SDK** | Mounts the iframe, forwards session tokens via PostMessage, relays events back to your page. |
+| **Embed iframe** | The full Sportuno tournament UI, served from the Sportuno CDN. Communicates only via PostMessage. |
+
+### Security model
+
+- **Secret keys** (`sk_*`) are used only server-to-server. They are never embedded in page HTML or JavaScript.
+- **Public keys** (`pk_*`) are safe to expose in the browser. They are passed to `window.Sportuno.init()` as `apiKey` to identify your operator account for catalog reads.
+- The iframe communicates with the parent page using targeted `postMessage` calls. Origins are validated on both sides.
+- The iframe sandbox attribute restricts capabilities to: `allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation-by-user-activation`.
+
+<Callout type="warn" title="Never expose your secret key">
+  The `sk_*` key must only be used in server-side code. If it is ever exposed in client-side JavaScript or version control, rotate it immediately from the operator dashboard.
+</Callout>
+
+## Session flow
+
+```
+User logs in to your site
+        │
+        ▼
+Your backend creates a widget session
+  POST /v1/widget/sessions  (sk_* key)
+  Body: { player_external_id, player_display_name, player_currency }
+        │
+        ▼
+Response: { session_token, widget_url, expires_at, refresh_before }
+        │
+        ▼
+Pass session_token to the JS SDK
+  window.Sportuno.init({ playerSessionId: session_token, ... })
+        │
+        ▼
+Iframe loads ── IFRAME_READY ──▶ SDK sends SESSION_SET_TOKEN to iframe
+        │
+        ▼
+Player interacts with tournaments
+        │
+        ▼
+refresh_before approaches
+  Your code calls window.Sportuno.updateSession() with new tokens
+        │
+        ▼
+SESSION_EXPIRED fires if token expires before refresh
+  Your onSessionExpired callback refreshes and calls updateSession()
+```
+
+## Quick navigation
+
+<Cards>
+  <Card title="JavaScript SDK" href="/docs/widget-integration/javascript-sdk">
+    Full reference for window.Sportuno methods and init config
+  </Card>
+  <Card title="Session Management" href="/docs/widget-integration/session-management">
+    Create, refresh, and expire sessions from your backend
+  </Card>
+  <Card title="PostMessage API" href="/docs/widget-integration/postmessage-api">
+    All 6 message types exchanged between iframe and parent
+  </Card>
+  <Card title="Anonymous Sessions" href="/docs/widget-integration/anonymous-sessions">
+    View-only embed for unauthenticated visitors
+  </Card>
+</Cards>

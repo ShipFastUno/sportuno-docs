@@ -1,0 +1,129 @@
+---
+title: Wallet Callbacks Overview
+description: How Sportuno calls your backend to debit and credit player wallets
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## What Are Wallet Callbacks?
+
+When a player takes a financial action inside the Sportuno widget — enrolling in a tournament, buying a rebuy, claiming a prize — Sportuno calls your backend synchronously to move funds. Your server is the source of truth for player balances; Sportuno never holds player funds itself.
+
+You implement two callback endpoints on your server:
+
+| Endpoint | Direction | Triggers |
+|----------|-----------|----------|
+| `POST /sportuno/players/:id/deduct` | Sportuno → You | Tournament entry, rebuy, add-on |
+| `POST /sportuno/players/:id/credit` | Sportuno → You | Prize payout, cancellation refund |
+
+Sportuno also calls two read-only endpoints:
+
+| Endpoint | Direction | Purpose |
+|----------|-----------|---------|
+| `GET /sportuno/players/:id/balance` | Sportuno → You | Check available balance before deduct |
+| `POST /sportuno/session/validate` | Sportuno → You | Validate player session on your side |
+
+<Callout type="info">
+You register your callback base URL during operator onboarding. All four endpoints are relative to that base URL. Example: if your base URL is `https://api.yourplatform.com`, Sportuno calls `https://api.yourplatform.com/sportuno/players/:id/deduct`.
+</Callout>
+
+## Security Model
+
+Every callback from Sportuno arrives with four security headers:
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `Authorization` | `Bearer {api_key}` | Static API key for quick rejection |
+| `X-Sportuno-Timestamp` | Unix milliseconds | Replay attack prevention |
+| `X-Sportuno-Signature` | Hex HMAC-SHA256 | Payload integrity + authentication |
+| `X-Sportuno-Operator-Id` | Your operator UUID | Routing / logging |
+
+Your server must verify all of these before processing any request. See [HMAC Verification](/docs/wallet-callbacks/hmac-verification) for the full algorithm.
+
+## Request Lifecycle
+
+```text
+Player action in widget
+        │
+        ▼
+Sportuno validates balance
+  GET /sportuno/players/:id/balance
+        │
+        ▼ (sufficient funds)
+Sportuno calls deduct
+  POST /sportuno/players/:id/deduct
+        │
+        ├─ 200 { success: true }  → tournament proceeds
+        ├─ 400 INSUFFICIENT_FUNDS → widget shows error to player
+        └─ 5xx / timeout          → Sportuno retries (3 attempts, exponential backoff)
+```
+
+## Retry Policy
+
+Sportuno will retry failed callback requests with the following schedule:
+
+| Attempt | Delay |
+|---------|-------|
+| 1 (initial) | Immediate |
+| 2 | 100 ms |
+| 3 | 5 000 ms |
+
+Only 5xx responses and network errors trigger retries. 4xx responses (including `INSUFFICIENT_FUNDS`) are considered final and are not retried.
+
+Because Sportuno may retry, your endpoints **must be idempotent**. Each request includes an `idempotency_key` field for this purpose. See [Idempotency](/docs/wallet-callbacks/idempotency) for the full contract.
+
+<Callout type="warn">
+Your callback endpoints must respond within **10 seconds**. Requests that time out are treated as server errors and retried. Ensure your wallet operations complete within this window.
+</Callout>
+
+## Response Contract
+
+### Success
+
+```json
+{
+  "success": true,
+  "operator_transaction_id": "txn_abc123",
+  "new_balance": 850.00
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `true` | Must be the literal boolean `true` |
+| `operator_transaction_id` | string | Your internal transaction ID — used for reconciliation |
+| `new_balance` | number | Player's balance after the operation |
+
+### Error
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "INSUFFICIENT_FUNDS",
+    "message": "Player balance is 50.00, required 100.00"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `false` | Must be the literal boolean `false` |
+| `error.code` | string | Machine-readable error code |
+| `error.message` | string | Human-readable description (logged, not shown to player) |
+
+### Accepted Error Codes
+
+| Code | HTTP Status | When to Use |
+|------|-------------|-------------|
+| `INSUFFICIENT_FUNDS` | 400 | Player does not have enough balance |
+| `PLAYER_NOT_FOUND` | 404 | Player ID not recognised in your system |
+| `WALLET_LOCKED` | 423 | Player account is suspended or self-excluded |
+| `INTERNAL_ERROR` | 500 | Unexpected server-side failure |
+
+## Next Steps
+
+- [HMAC Verification](/docs/wallet-callbacks/hmac-verification) — Verify every inbound request
+- [Deduct Endpoint](/docs/wallet-callbacks/deduct) — Handle tournament entry, rebuy, and add-on
+- [Credit Endpoint](/docs/wallet-callbacks/credit) — Handle prize payouts and refunds
+- [Idempotency](/docs/wallet-callbacks/idempotency) — Safely handle retries

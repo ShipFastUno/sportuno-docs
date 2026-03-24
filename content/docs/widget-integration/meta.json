@@ -1,0 +1,10 @@
+{
+  "title": "Widget Integration",
+  "pages": [
+    "overview",
+    "javascript-sdk",
+    "session-management",
+    "postmessage-api",
+    "anonymous-sessions"
+  ]
+}

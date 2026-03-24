@@ -1,0 +1,161 @@
+---
+title: Anonymous Sessions
+description: Embed the Sportuno widget in view-only mode for unauthenticated visitors
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Steps, Step } from 'fumadocs-ui/components/steps';
+
+Anonymous sessions let you embed the Sportuno widget for visitors who have not logged in. The widget loads in view-only mode — players can browse tournaments and leaderboards but cannot enroll, place bets, or take any action that requires an account.
+
+## Permissions
+
+| Permission | Authenticated | Anonymous |
+|------------|:---:|:---:|
+| View tournaments | Yes | Yes |
+| View leaderboard | Yes | Yes |
+| Enroll in tournament | Yes | No |
+| Place bets | Yes | No |
+| Rebuy / add-on | Yes | No |
+| View personal bet history | Yes | No |
+
+## Creating an anonymous session
+
+**`POST /v1/widget/sessions`**
+
+Use the same session endpoint as authenticated sessions, but pass `anonymous: true` in the request body. No player identity is required.
+
+```http
+POST /v1/widget/sessions
+Authorization: Bearer sk_live_...
+X-Operator-ID: your-operator-id
+Content-Type: application/json
+
+{
+  "anonymous": true,
+  "allowed_origins": ["https://yourplatform.com"]
+}
+```
+
+### Response
+
+```json
+{
+  "session_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "widget_url": "https://embed.sportuno.com?...",
+  "expires_at": "2026-03-24T15:00:00Z",
+  "refresh_before": "2026-03-24T14:50:00Z",
+  "session_id": "a1b2c3d4-..."
+}
+```
+
+The response has the same shape as an authenticated session. Pass `session_token` to the JS SDK as `playerSessionId`.
+
+<Callout type="info">
+  Anonymous sessions are subject to rate limiting. If your page receives high traffic from unauthenticated visitors, cache the anonymous session token on your backend and reuse it across requests until it approaches expiry.
+</Callout>
+
+## Embedding with an anonymous session
+
+Pass the anonymous `session_token` to `window.Sportuno.init()` exactly the same way as an authenticated session token:
+
+```javascript
+window.Sportuno.init({
+  clientId: 'your-client-id',
+  apiKey: 'pk_live_...',
+  language: 'en',
+  playerSessionId: anonymousSessionToken,
+  onSessionExpired: function () {
+    // Fetch a fresh anonymous token from your BFF and update
+    fetch('/api/anonymous-session')
+      .then(res => res.json())
+      .then(({ sessionToken }) => {
+        window.Sportuno.updateSession({
+          playerSessionId: sessionToken,
+          gameSessionId: '',
+        });
+      });
+  },
+});
+```
+
+## Upgrade to an authenticated session
+
+When an anonymous visitor logs in, replace the anonymous session with an authenticated one without remounting the iframe:
+
+<Steps>
+  <Step>
+    The player logs in on your platform.
+  </Step>
+  <Step>
+    Your backend calls `POST /v1/widget/sessions` with the player's identity to create an authenticated session.
+  </Step>
+  <Step>
+    Call `window.Sportuno.updateSession()` with the new tokens to push the authenticated session into the already-mounted iframe.
+
+    ```javascript
+    window.Sportuno.updateSession({
+      playerSessionId: authenticatedSessionToken,
+      gameSessionId: gameSessionId,
+    });
+    ```
+  </Step>
+  <Step>
+    The iframe upgrades the session in-place — no page reload or iframe remount required. The player sees their authenticated view immediately.
+  </Step>
+</Steps>
+
+## Downgrade to anonymous on logout
+
+When the player logs out, close the authenticated session and optionally restore an anonymous session:
+
+```javascript
+// 1. Close the authenticated session in the iframe
+window.Sportuno.closeSession();
+
+// 2. (Optional) Immediately restore view-only mode
+//    Fetch a new anonymous token and push it in
+fetch('/api/anonymous-session')
+  .then(res => res.json())
+  .then(({ sessionToken }) => {
+    window.Sportuno.updateSession({
+      playerSessionId: sessionToken,
+      gameSessionId: '',
+    });
+  });
+```
+
+<Callout type="info">
+  If you do not push an anonymous token after `closeSession()`, the iframe will display a logged-out state. Whether to restore anonymous view-only mode is your design decision.
+</Callout>
+
+## Backend caching recommendation
+
+Anonymous sessions are identical for all visitors — there is no player-specific data in the token. To avoid creating a new session on every page load, cache the session token on your backend and reuse it until `refresh_before`:
+
+```typescript
+let cachedAnonymousSession: {
+  sessionToken: string;
+  gameSessionId: string;
+  refreshBefore: Date;
+} | null = null;
+
+async function getAnonymousSession() {
+  if (
+    cachedAnonymousSession &&
+    new Date() < cachedAnonymousSession.refreshBefore
+  ) {
+    return cachedAnonymousSession;
+  }
+
+  const data = await sportunoAuth.createAnonymousSession();
+  cachedAnonymousSession = {
+    sessionToken: data.session_token,
+    gameSessionId: '',
+    refreshBefore: new Date(data.refresh_before),
+  };
+  return cachedAnonymousSession;
+}
+```
+
+This pattern significantly reduces the number of session creation calls for high-traffic anonymous landing pages.

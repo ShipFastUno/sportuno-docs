@@ -1,0 +1,227 @@
+---
+title: HMAC Verification
+description: Verify every inbound Sportuno wallet callback with HMAC-SHA256
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Overview
+
+Every wallet callback and webhook from Sportuno is signed with HMAC-SHA256. You must verify this signature before processing any request. Failing to verify allows any party to forge debits or credits against your players' wallets.
+
+The verification algorithm involves three checks:
+1. The `Authorization` bearer token matches your configured API key
+2. The `X-Sportuno-Timestamp` is within ±5 minutes of now
+3. The `X-Sportuno-Signature` matches a freshly computed HMAC over the request payload
+
+## Request Headers
+
+| Header | Example | Description |
+|--------|---------|-------------|
+| `Authorization` | `Bearer sk_live_…` | Static API key shared during onboarding |
+| `X-Sportuno-Timestamp` | `1737740000000` | Unix timestamp in **milliseconds** |
+| `X-Sportuno-Signature` | `a3f9e2...` | Hex-encoded HMAC-SHA256 signature |
+| `X-Sportuno-Operator-Id` | `550e8400-e29b-41d4-a716-446655440000` | Your operator UUID (informational) |
+
+<Callout type="warn">
+All four headers must be present. Reject any request missing `X-Sportuno-Signature` or `X-Sportuno-Timestamp` with HTTP 401 immediately, before touching your database.
+</Callout>
+
+## Signature Algorithm
+
+### Step 1: Build the payload string
+
+Concatenate the timestamp and the raw request body, separated by a period:
+
+```
+{X-Sportuno-Timestamp}.{raw_request_body}
+```
+
+Example:
+
+```
+1737740000000.{"transaction_id":"txn_abc","amount":100,"reason":"TOURNAMENT_ENTRY","reference":{"tournament_id":"t_xyz","tournament_name":"Sunday Slam"},"idempotency_key":"ik_abc"}
+```
+
+<Callout type="info">
+Use the raw request body bytes — do not parse and re-serialize the JSON. Whitespace differences will cause signature mismatches.
+</Callout>
+
+### Step 2: Compute HMAC-SHA256
+
+Compute HMAC-SHA256 over the payload string using your `SPORTUNO_API_SECRET` as the key. Encode the result as a lowercase hex string.
+
+### Step 3: Constant-time comparison
+
+Compare the computed signature against the `X-Sportuno-Signature` header using a timing-safe equality function. **Do not use `===`** — this leaks timing information that can be exploited to forge signatures.
+
+## Implementation Examples
+
+### TypeScript / Bun
+
+```typescript
+import { createHmac, timingSafeEqual } from 'crypto';
+
+const MAX_TIMESTAMP_AGE_MS = 5 * 60 * 1000; // 5 minutes
+
+function verifyHmac(
+  rawBody: string,
+  timestamp: string,
+  signature: string,
+  secret: string
+): boolean {
+  // Check timestamp window
+  const ts = parseInt(timestamp, 10);
+  if (isNaN(ts)) return false;
+
+  const age = Date.now() - ts;
+  if (Math.abs(age) > MAX_TIMESTAMP_AGE_MS) return false;
+
+  // Build payload
+  const payload = `${timestamp}.${rawBody}`;
+
+  // Compute expected signature
+  const expected = createHmac('sha256', secret)
+    .update(payload, 'utf8')
+    .digest('hex');
+
+  // Timing-safe comparison
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  const actualBuf = Buffer.from(signature, 'utf8');
+
+  if (expectedBuf.length !== actualBuf.length) return false;
+  return timingSafeEqual(expectedBuf, actualBuf);
+}
+```
+
+### Python
+
+```python
+import hmac
+import hashlib
+import time
+
+MAX_TIMESTAMP_AGE_S = 300  # 5 minutes
+
+def verify_hmac(
+    raw_body: str,
+    timestamp: str,
+    signature: str,
+    secret: str
+) -> bool:
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return False
+
+    # Check timestamp window (timestamp is in milliseconds)
+    age_s = abs(time.time() - ts / 1000)
+    if age_s > MAX_TIMESTAMP_AGE_S:
+        return False
+
+    # Build payload
+    payload = f"{timestamp}.{raw_body}"
+
+    # Compute expected signature
+    expected = hmac.new(
+        secret.encode('utf-8'),
+        payload.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+
+    # Timing-safe comparison
+    return hmac.compare_digest(expected, signature)
+```
+
+### Go
+
+```go
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/hex"
+    "math"
+    "strconv"
+    "time"
+)
+
+const maxTimestampAgeMs = 5 * 60 * 1000
+
+func verifyHmac(rawBody, timestamp, signature, secret string) bool {
+    ts, err := strconv.ParseInt(timestamp, 10, 64)
+    if err != nil {
+        return false
+    }
+
+    // Check timestamp window
+    ageMs := math.Abs(float64(time.Now().UnixMilli() - ts))
+    if ageMs > maxTimestampAgeMs {
+        return false
+    }
+
+    // Build payload
+    payload := timestamp + "." + rawBody
+
+    // Compute expected signature
+    mac := hmac.New(sha256.New, []byte(secret))
+    mac.Write([]byte(payload))
+    expected := hex.EncodeToString(mac.Sum(nil))
+
+    // Timing-safe comparison
+    return hmac.Equal([]byte(expected), []byte(signature))
+}
+```
+
+## Middleware Pattern
+
+Structure your callback endpoints so that HMAC verification runs before any business logic. Reject early and avoid database calls on invalid requests.
+
+```typescript
+// Elysia middleware pattern (matches the operator-api reference implementation)
+.derive(async ({ request, headers }) => {
+  const signature = headers['x-sportuno-signature'];
+  const timestamp = headers['x-sportuno-timestamp'];
+
+  if (!signature || !timestamp) {
+    throw new Error('Missing signature headers'); // → 401
+  }
+
+  const authHeader = headers['authorization'];
+  if (!authHeader?.startsWith('Bearer ') || authHeader.slice(7) !== env.SPORTUNO_API_KEY) {
+    throw new Error('Invalid API key'); // → 401
+  }
+
+  const rawBody = await request.clone().text();
+  const valid = verifyHmac(rawBody, timestamp, signature, env.SPORTUNO_API_SECRET);
+
+  if (!valid) {
+    throw new Error('Invalid signature'); // → 401
+  }
+
+  return { hmacVerified: true };
+})
+```
+
+## Error Responses
+
+| Condition | HTTP Status | Recommended Response |
+|-----------|-------------|----------------------|
+| Missing headers | 401 | `{ "error": "Unauthorized" }` |
+| Invalid API key | 401 | `{ "error": "Unauthorized" }` |
+| Timestamp outside window | 401 | `{ "error": "Unauthorized" }` |
+| Signature mismatch | 401 | `{ "error": "Unauthorized" }` |
+
+<Callout type="info">
+Return a generic 401 for all HMAC failures. Do not leak which specific check failed — this would give an attacker information to craft better forgeries.
+</Callout>
+
+## Environment Variables
+
+You will need two secrets configured in your server environment:
+
+| Variable | Description |
+|----------|-------------|
+| `SPORTUNO_API_KEY` | The bearer token Sportuno sends in `Authorization` |
+| `SPORTUNO_API_SECRET` | The HMAC signing secret used for `X-Sportuno-Signature` |
+
+Both values are provided during operator onboarding and differ between test (`sk_test_*`) and live (`sk_live_*`) environments.

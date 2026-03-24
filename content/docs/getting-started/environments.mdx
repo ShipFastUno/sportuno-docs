@@ -1,0 +1,183 @@
+---
+title: Environments
+description: UAT sandbox and production — base URLs, API keys, and how to switch between them
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+Sportuno provides two environments: **UAT** (sandbox) for development and testing, and **Production** for live traffic. They are fully isolated — data, accounts, and sessions do not cross between them.
+
+---
+
+## Environment Reference
+
+|  | UAT (Sandbox) | Production |
+|--|--------------|------------|
+| **Auth / Session API** | `https://api-uat.sportuno.win` | `https://api.sportuno.com` |
+| **Embed CDN** | `https://embed-uat.sportuno.win` | `https://embed.sportuno.com` |
+| **OpenAPI spec** | `https://api-uat.sportuno.win/v1/.well-known/openapi.json` | `https://api.sportuno.com/v1/.well-known/openapi.json` |
+| **Secret API key prefix** | `sk_test_` | `sk_live_` |
+| **Public API key prefix** | `pk_test_` | `pk_live_` |
+| **Player funds** | Simulated — no real money | Real wallet transactions |
+| **Tournaments** | Seeded test tournaments | Live operator tournaments |
+
+---
+
+## UAT Sandbox
+
+Use UAT throughout development and QA. It behaves identically to production except:
+
+- **No real money** — wallet callbacks use simulated balances
+- **Test tournaments** — Sportuno seeds the sandbox with pre-configured tournaments
+- **Relaxed rate limits** — slightly higher thresholds to ease testing
+- **Same API contract** — every endpoint, field, and error code matches production exactly
+
+<Callout type="info">
+UAT is fully functional. You can run complete end-to-end flows — enrollment, betting, settlement, and leaderboard — against real Sportuno logic using test data.
+</Callout>
+
+### UAT Configuration
+
+<Tabs items={['Environment Variables', 'Direct Values']}>
+
+<Tab value="Environment Variables">
+```bash
+# Server-side
+SPORTUNO_API_KEY=sk_test_your_uat_secret_key
+SPORTUNO_OPERATOR_ID=your-operator-uuid
+SPORTUNO_AUTH_URL=https://api-uat.sportuno.win
+SPORTUNO_API_SECRET=your-hmac-secret
+
+# Browser-safe (Next.js / Vite / similar)
+NEXT_PUBLIC_SPORTUNO_API_KEY=pk_test_your_uat_public_key
+NEXT_PUBLIC_SPORTUNO_CLIENT_ID=your-operator-uuid
+NEXT_PUBLIC_SPORTUNO_EMBED_URL=https://embed-uat.sportuno.win
+```
+</Tab>
+
+<Tab value="Direct Values">
+```text
+Auth API base URL:    https://api-uat.sportuno.win
+Embed CDN base URL:  https://embed-uat.sportuno.win
+Secret key:          sk_test_...
+Public key:          pk_test_...
+Widget session path: /api/v1/widget/sessions
+```
+</Tab>
+
+</Tabs>
+
+---
+
+## Production
+
+Production handles real player traffic and real wallet transactions. Only deploy to production after:
+
+1. Integration review with Sportuno is complete
+2. You have received `sk_live_*` and `pk_live_*` keys
+3. Your wallet callback endpoints are stable and HMAC verification is implemented
+4. You have tested the full enrollment-to-settlement flow in UAT
+
+### Production Configuration
+
+<Tabs items={['Environment Variables', 'Direct Values']}>
+
+<Tab value="Environment Variables">
+```bash
+# Server-side
+SPORTUNO_API_KEY=sk_live_your_production_secret_key
+SPORTUNO_OPERATOR_ID=your-operator-uuid
+SPORTUNO_AUTH_URL=https://api.sportuno.com
+SPORTUNO_API_SECRET=your-hmac-secret
+
+# Browser-safe (Next.js / Vite / similar)
+NEXT_PUBLIC_SPORTUNO_API_KEY=pk_live_your_production_public_key
+NEXT_PUBLIC_SPORTUNO_CLIENT_ID=your-operator-uuid
+NEXT_PUBLIC_SPORTUNO_EMBED_URL=https://embed.sportuno.com
+```
+</Tab>
+
+<Tab value="Direct Values">
+```text
+Auth API base URL:    https://api.sportuno.com
+Embed CDN base URL:  https://embed.sportuno.com
+Secret key:          sk_live_...
+Public key:          pk_live_...
+Widget session path: /api/v1/widget/sessions
+```
+</Tab>
+
+</Tabs>
+
+<Callout type="warn">
+Never point UAT client keys (`pk_test_*` / `sk_test_*`) at production URLs, or vice versa. Key prefix and environment must match. A mismatch returns `401 INVALID_API_KEY`.
+</Callout>
+
+---
+
+## Switching Between Environments
+
+The only changes required to switch environments are your **API keys** and **base URLs**. The API contract is identical. A clean way to manage this is a single environment variable that controls which set to load:
+
+```js
+// config/sportuno.js — Node.js example
+const isProd = process.env.NODE_ENV === 'production';
+
+export const sportunoConfig = {
+  authUrl: isProd
+    ? 'https://api.sportuno.com'
+    : 'https://api-uat.sportuno.win',
+  apiKey: isProd
+    ? process.env.SPORTUNO_API_KEY_LIVE      // sk_live_*
+    : process.env.SPORTUNO_API_KEY_TEST,     // sk_test_*
+  operatorId: process.env.SPORTUNO_OPERATOR_ID,
+  hmacSecret: process.env.SPORTUNO_API_SECRET,
+};
+```
+
+```python
+# config/sportuno.py — Python example
+import os
+
+IS_PROD = os.environ.get('ENV') == 'production'
+
+SPORTUNO_AUTH_URL = (
+    'https://api.sportuno.com'
+    if IS_PROD else
+    'https://api-uat.sportuno.win'
+)
+SPORTUNO_API_KEY = (
+    os.environ['SPORTUNO_API_KEY_LIVE']
+    if IS_PROD else
+    os.environ['SPORTUNO_API_KEY_TEST']
+)
+SPORTUNO_OPERATOR_ID = os.environ['SPORTUNO_OPERATOR_ID']
+```
+
+---
+
+## Data Isolation
+
+| Data | UAT | Production |
+|------|-----|------------|
+| Player accounts | Separate — test accounts only | Live player accounts |
+| Tournaments | Sportuno-seeded test data | Operator-configured live tournaments |
+| Wallet balances | Simulated | Real (debited/credited via your callbacks) |
+| Session tokens | Valid only in UAT | Valid only in production |
+| API keys | `sk_test_*` / `pk_test_*` | `sk_live_*` / `pk_live_*` |
+
+There is no data migration or promotion between environments. Test data stays in UAT.
+
+---
+
+## Environment Health
+
+Monitor environment status at **https://status.sportuno.com**.
+
+The status page reports uptime and active incidents for:
+- Auth API (session creation)
+- Edge API (widget data)
+- Realtime gateway
+- Settlement pipeline
+- UAT and production separately

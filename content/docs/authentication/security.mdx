@@ -1,0 +1,161 @@
+---
+title: Security
+description: Key hashing, domain restrictions, IP whitelisting, key rotation, and compliance considerations for Sportuno API credentials.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+## Key Storage and Hashing
+
+Sportuno API keys are never stored in plaintext. At creation time, the key is hashed using **Argon2id** (the OWASP-recommended algorithm for password and secret hashing) and only the hash is persisted. The plaintext key is returned once in the API response and then discarded.
+
+| Scenario | Algorithm |
+|----------|-----------|
+| New keys | Argon2id |
+| Legacy keys (pre-migration) | SHA-256 (auto-upgraded on next use) |
+
+When a legacy SHA-256 key is successfully verified, the system transparently re-hashes it with Argon2id and replaces the stored hash. No manual migration step is required.
+
+<Callout type="info" title="Key format is self-describing">
+The `{type}_{env}_` prefix lets your code distinguish key types without any API call. Parse the prefix before sending a request to avoid sending a secret key from the browser.
+</Callout>
+
+## Browser Detection for Secret Keys
+
+The most common cause of accidental secret key exposure is calling a server-side endpoint from client-side JavaScript. Sportuno actively detects this by checking for the `Origin` header.
+
+Browsers always send an `Origin` header on cross-origin requests, and typically on same-origin requests as well. Server-side HTTP clients (curl, Rust's `reqwest`, Node.js `fetch`, etc.) do not send `Origin` unless explicitly set.
+
+**Rule:** Any request carrying a `sk_*` or privileged `rk_*` key that also includes an `Origin` header is rejected immediately with `403 SECRET_KEY_FROM_BROWSER`.
+
+```
+Request with sk_live_… + Origin: https://app.example.com
+→ 403 SECRET_KEY_FROM_BROWSER
+```
+
+This is a defence-in-depth measure. Even if a developer accidentally hard-codes a secret key in client JavaScript, every attempt to use it from the browser will fail.
+
+## Domain Restrictions
+
+Publishable keys (`pk_*`) support an `allowed_domains` list. Requests are checked against the `Origin` and `Referer` headers:
+
+- An empty `allowed_domains` list blocks all browser requests (key is effectively server-only).
+- Wildcard subdomains are supported: `*.operator.com` matches `app.operator.com` and `staging.operator.com`.
+- Exact matches and wildcards can be combined in the same list.
+
+```json
+{
+  "allowed_domains": [
+    "app.operator.com",
+    "*.staging.operator.com"
+  ]
+}
+```
+
+Requests from origins not on the list receive `403 DOMAIN_NOT_ALLOWED`.
+
+<Callout type="warn">
+During development, add `localhost` or `127.0.0.1` to your test key's `allowed_domains`. Never add these to production keys.
+</Callout>
+
+## IP Whitelisting
+
+Secret keys (`sk_*`) and restricted keys (`rk_*`) support IP whitelisting. When an IP whitelist is configured, only requests originating from listed IPs or CIDR ranges are accepted. Requests from unlisted IPs receive `403 IP_NOT_ALLOWED`.
+
+```json
+{
+  "ip_whitelist": [
+    "203.0.113.10",
+    "198.51.100.0/24"
+  ]
+}
+```
+
+An empty `ip_whitelist` array disables IP filtering (all IPs allowed).
+
+**Recommendations:**
+
+- Add the egress IP(s) of your production backend to your `sk_live_*` key's whitelist.
+- Use CIDR notation if your infrastructure uses multiple IPs or dynamic scaling groups.
+- Pair IP whitelisting with domain restriction for defence in depth.
+
+## Scope-Based Access for Restricted Keys
+
+Restricted keys (`rk_*`) are issued with an explicit list of scopes. Every request is checked against the key's scopes before processing. A key lacking the required scope receives `403 SCOPE_DENIED`.
+
+This lets you issue narrow credentials to third-party services (for example, a leaderboard display widget with only `leaderboards:read`) without exposing full operator capabilities.
+
+**Design principle:** Issue the minimum scope required. Prefer restricted keys over secret keys wherever possible for service-to-service integrations.
+
+## Key Rotation
+
+Rotating keys without downtime is a first-class operation. The rotation flow allows you to issue a new key and keep the old one valid during a configurable grace period.
+
+**Step-by-step:**
+
+1. **Initiate rotation** — Call the rotate endpoint. A new key is issued immediately. The plaintext of the new key is returned in the response and is not shown again.
+
+2. **Deploy the new key** — Update your environment variables or secrets manager with the new key value.
+
+3. **Grace period** — The old key remains valid for the configured `grace_period_days` (default: 7 days). Both keys work in parallel during this window.
+
+4. **Automatic expiry** — After the grace period, the old key is automatically invalidated. No further action required.
+
+```
+Day 0: rotate() called → new key issued, old key grace period begins
+Day 0–7: both keys valid → deploy new key at your own pace
+Day 7: old key expires → only new key works
+```
+
+<Callout type="info">
+The edge-API credential cache is invalidated immediately when a rotation is initiated. The new key is accepted within seconds. The old key continues to be served from the database until its grace period ends.
+</Callout>
+
+## Immediate Revocation
+
+For suspected key compromise, use the revoke endpoint rather than the rotate endpoint. Revocation takes immediate effect — the key is marked inactive in the database within seconds.
+
+However, the edge-API caches credentials for up to 5 minutes by default. During this window, the revoked key may still be accepted. If immediate enforcement is required, contact support to flush the cache.
+
+**After revoking a compromised key:**
+
+1. Revoke the key via the backoffice API.
+2. Check audit logs for any requests made with the compromised key.
+3. Issue a replacement key.
+4. Review and update your key storage practices.
+
+## Rate Limits
+
+Rate limits are enforced per operator at the edge. Limits vary by endpoint tier:
+
+| Category | Limit |
+|----------|-------|
+| Financial operations (bets, rebuy, addon) | 200 requests/min |
+| Session creation | 10,000 requests/min |
+| Leaderboard reads | 100 requests/min |
+| Catalog reads | 500 requests/min |
+
+Requests that exceed the rate limit receive `429 Too Many Requests`. Implement exponential backoff with jitter in your client code.
+
+## Audit Logging
+
+All API key operations are logged for compliance purposes:
+
+- Key creation, rotation, and revocation
+- Authentication failures (with error code and source IP)
+- Operator status changes
+
+Audit logs are available via the backoffice API and are retained for 90 days by default. Extended retention is available for SOC2 and PCI-DSS compliance tiers.
+
+## Defence-in-Depth Summary
+
+| Layer | Mechanism |
+|-------|-----------|
+| Key hashing | Argon2id — keys cannot be recovered from database breach |
+| Browser detection | `Origin` header check — prevents `sk_*` use from browsers |
+| Domain restriction | `allowed_domains` — prevents `pk_*` key abuse from other origins |
+| IP whitelisting | Source IP check — restricts `sk_*`/`rk_*` to known infrastructure |
+| Scope restriction | Scopes on `rk_*` — limits blast radius of third-party integrations |
+| JWT short TTL | 15-minute expiry — limits session hijacking window |
+| Operator status check | Re-validated on every JWT refresh — fast propagation of account suspension |
+| Audit logging | Full key operation trail — supports incident response and compliance |
