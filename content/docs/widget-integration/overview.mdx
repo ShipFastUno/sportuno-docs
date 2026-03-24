@@ -12,29 +12,29 @@ The Sportuno widget is an embeddable iframe that delivers a full tournament expe
 
 The integration has three layers that interact at runtime:
 
-```
+```text
 Your Backend                    Sportuno API
-    │                               │
-    │  POST /v1/widget/sessions     │
-    │  Authorization: Bearer sk_*   │
-    │──────────────────────────────▶│
-    │                               │
-    │◀── { session_token,           │
-    │       widget_url,             │
-    │       expires_at,             │
-    │       refresh_before }        │
-    │                               │
+    |                               |
+    |  POST /v1/widget/sessions     |
+    |  Authorization: Bearer sk_*   |
+    |------------------------------>|
+    |                               |
+    |<-- { session_token,           |
+    |       widget_url,             |
+    |       expires_at,             |
+    |       refresh_before }        |
+    |                               |
 Your Frontend                   Embed iframe (widget_url)
-    │                               │
-    │  window.Sportuno.init({       │
-    │    playerSessionId,           │
-    │    gameSessionId              │
-    │  })                           │
-    │                               │
-    │◀──── PostMessage events ─────▶│
-    │  IFRAME_READY                 │
-    │  SESSION_EXPIRED              │
-    │  REQUEST_SHARE                │
+    |                               |
+    |  window.Sportuno.init({       |
+    |    playerSessionId,           |
+    |    gameSessionId              |
+    |  })                           |
+    |                               |
+    |<---- PostMessage events ----->|
+    |  IFRAME_READY                 |
+    |  SESSION_EXPIRED              |
+    |  REQUEST_SHARE                |
 ```
 
 ### Components
@@ -59,35 +59,14 @@ Your Frontend                   Embed iframe (widget_url)
 
 ## Session flow
 
-```
-User logs in to your site
-        │
-        ▼
-Your backend creates a widget session
-  POST /v1/widget/sessions  (sk_* key)
-  Body: { player_external_id, player_display_name, player_currency }
-        │
-        ▼
-Response: { session_token, widget_url, expires_at, refresh_before }
-        │
-        ▼
-Pass session_token to the JS SDK
-  window.Sportuno.init({ playerSessionId: session_token, ... })
-        │
-        ▼
-Iframe loads ── IFRAME_READY ──▶ SDK sends SESSION_SET_TOKEN to iframe
-        │
-        ▼
-Player interacts with tournaments
-        │
-        ▼
-refresh_before approaches
-  Your code calls window.Sportuno.updateSession() with new tokens
-        │
-        ▼
-SESSION_EXPIRED fires if token expires before refresh
-  Your onSessionExpired callback refreshes and calls updateSession()
-```
+1. User logs in to your site
+2. Your backend creates a widget session — `POST /v1/widget/sessions` with `sk_*` key
+3. Response includes `session_token`, `widget_url`, `expires_at`, `refresh_before`
+4. Pass `session_token` to the JS SDK via `window.Sportuno.init()`
+5. Iframe loads and fires `IFRAME_READY` — SDK sends the token to the iframe
+6. Player interacts with tournaments
+7. Before `refresh_before`, call `window.Sportuno.updateSession()` with a fresh token
+8. If the token expires before refresh, `SESSION_EXPIRED` fires and your `onSessionExpired` callback handles it
 
 ## Quick navigation
 
