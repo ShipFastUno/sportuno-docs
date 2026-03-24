@@ -1,119 +1,53 @@
 ---
 title: Changelog
-description: API version history and release notes
+description: Release history and upcoming changes
 ---
-
-import { Callout } from 'fumadocs-ui/components/callout';
 
 ## Versioning
 
-The Sportuno Operator API uses date-based versioning in the URL path:
-
-```
-https://api.sportuno.win/v1/...
-```
-
-The current version is **v1**. Breaking changes will be released under a new version prefix (e.g., `/v2/`) with a deprecation notice and migration period. Non-breaking additions (new fields, new endpoints) are made to the existing version.
-
-<Callout type="info">
-Subscribe to the [Sportuno developer newsletter](https://developers.sportuno.com/newsletter) to receive advance notice of API changes.
-</Callout>
+The current integration version is **v1**. Breaking changes will be communicated with advance notice and a migration period.
 
 ---
 
 ## v1.0.0 — 2026-03-24
 
-Initial public release of the Sportuno Operator API.
+Initial release of the Sportuno operator integration.
 
-### Authentication
+### Widget Session
 
-- `POST /v1/widget/sessions` — Create authenticated and anonymous widget sessions
-- `POST /v1/widget/sessions/refresh` — Refresh an existing widget session
-- RS256-signed JWTs for widget authentication
+- Create authenticated and anonymous widget sessions
+- Configurable session expiry (300–3600 seconds)
+- Optional `tournament_id` scope for focused sessions
+- `allowed_origins` enforcement
 - `sk_*` / `pk_*` key-pair model with separate test and live environments
 
-### Session Management
+### JavaScript SDK
 
-- Configurable expiry (300–3600 seconds)
-- Optional `tournament_id` scope for focused sessions
-- `allowed_origins` enforcement (1–10 allowed origins per session)
-
-### Catalog (pk_* access)
-
-- `GET /v1/tournaments` — Paginated tournament listing with filtering
-- `GET /v1/tournaments/{id}` — Tournament detail with structure
-- `GET /v1/tournaments/{id}/events` — Events within a tournament
-- `GET /v1/events/{id}/markets` — Markets for a sporting event
-- `GET /v1/markets/{id}/selections` — Selections with current odds
-- `GET /v1/odds` — Bulk odds fetch
-- `GET /v1/tournament-groups` — Tournament group listing
-- `GET /v1/leaderboards` — Leaderboard listing
-- `GET /v1/tournaments/{id}/leaderboard` — Live tournament leaderboard
-
-### Player Actions (widget JWT)
-
-- `POST /v1/tournaments/{id}/enroll` — Tournament enrollment
-- `GET /v1/tournaments/{id}/my-enrollment` — Enrollment status check
-- `POST /v1/tournaments/{id}/rebuy` — Rebuy execution
-- `GET /v1/tournaments/{id}/rebuy-status` — Rebuy availability
-- `POST /v1/tournaments/{id}/addon` — Add-on execution
-- `GET /v1/tournaments/{id}/addon-status` — Add-on availability
-- `POST /v1/tournaments/{id}/bets` — Place one or more bets
-- `GET /v1/tournaments/{id}/bets/history` — Bet history
-- `GET /v1/profile` — Player profile
-- `PUT /v1/profile` — Update display name and avatar
+- `window.Sportuno.init()` — embed the tournament widget
+- `window.Sportuno.updateSession()` — push refreshed session token
+- `window.Sportuno.closeSession()` — log out the widget
+- `window.Sportuno.setLanguage()` — change language at runtime
 
 ### Wallet Callbacks
 
-- `POST /sportuno/players/:id/deduct` — Debit player wallet (entry, rebuy, add-on)
-- `POST /sportuno/players/:id/credit` — Credit player wallet (prize, refund)
-- `GET /sportuno/players/:id/balance` — Read player balance
-- `POST /sportuno/session/validate` — Validate player session
+- Debit player wallet (tournament entry, rebuy, add-on)
+- Credit player wallet (prize payout, refund)
 - HMAC-SHA256 request signing with timestamp replay protection
 - Idempotency key support on all financial operations
-- 3-attempt retry with exponential backoff (100ms → 5s)
+- 3-attempt retry with exponential backoff
 
 ### Webhooks
 
-- `POST /sportuno/webhooks` — Unified event delivery endpoint
-- Events: `tournament.joined`, `tournament.settled`, `tournament.cancelled`
-- Same HMAC signing scheme as wallet callbacks
-- 5-attempt retry with exponential backoff (30s → 2h)
-
-### Realtime
-
-- `POST /v1/realtime/token` — Issue Ably capability token
-- Ably-based pub/sub for markets, leaderboards, player state, and lobby
-- Three token tiers: widget JWT (900s), `pk_*` (1800s), `sk_*` (3600s)
-- Channel namespaces: `tournament:*`, `market:*`, `leaderboard:*`, `event:*`, `odds:*`, `lobby`, `user:*`, `player:*`, `ticker:*`
-
-### Rate Limiting
-
-- Financial tier: 200 req/min
-- Session tier: 10,000 req/min
-- Leaderboard tier: 100 req/min
-- Catalog tier: 500 req/min
-- Standard `X-RateLimit-*` response headers on all endpoints
-
-### OpenAPI
-
-- OpenAPI 3.1 specification at `/v1/.well-known/openapi.json`
-- Available in both UAT and production
+- `tournament.joined` — player enrolled in a tournament
+- `tournament.settled` — tournament results finalized
+- `tournament.cancelled` — tournament cancelled with refunds
 
 ---
 
 ## Upcoming
 
-The following features are planned for future releases. Dates are indicative.
-
-| Feature | Target Version | Expected |
-|---------|---------------|----------|
-| Operator-level webhooks (no player scope) | v1.1 | Q2 2026 |
-| Bulk player balance endpoint | v1.1 | Q2 2026 |
-| Player self-exclusion callback | v1.2 | Q3 2026 |
-| Multi-currency prize payouts | v1.2 | Q3 2026 |
-| Custom tournament entry validation hook | v1.3 | Q4 2026 |
-
-<Callout type="info">
-Planned features are subject to change. If a specific capability is critical to your integration, contact your Sportuno integration manager to share requirements and influence the roadmap.
-</Callout>
+| Feature | Expected |
+|---------|----------|
+| Bulk player balance endpoint | Q2 2026 |
+| Player self-exclusion callback | Q3 2026 |
+| Custom tournament entry validation hook | Q4 2026 |
